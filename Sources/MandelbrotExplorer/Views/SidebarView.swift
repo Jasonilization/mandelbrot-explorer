@@ -53,6 +53,20 @@ struct SidebarView: View {
                     Text(renderer.currentTierLabel)
                         .foregroundStyle(.secondary)
                 }
+
+                LabeledContent("Precision Budget") {
+                    Text("~\(Int(Double(renderer.viewport.precisionTerms) * 15.5)) digits")
+                        .foregroundStyle(.secondary)
+                }
+
+                if renderer.viewport.tier == .perturbation, renderer.referenceOrbitIterations > 0 {
+                    LabeledContent("Series Approximation") {
+                        Text(renderer.seriesApproximationSkip > 0
+                             ? "\(renderer.seriesApproximationSkip) / \(renderer.referenceOrbitIterations) skipped"
+                             : "not engaged")
+                            .foregroundStyle(.secondary)
+                    }
+                }
             }
 
             Section("Auto Zoom") {
@@ -81,6 +95,7 @@ struct SidebarView: View {
                 } label: {
                     Label("Record Zoom Journey…", systemImage: "video.badge.waveform")
                 }
+                .disabled(!renderer.isReady)
                 if recorder.isActive {
                     Label("Recording in progress", systemImage: "record.circle")
                         .font(.caption)

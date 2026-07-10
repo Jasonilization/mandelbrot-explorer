@@ -1,8 +1,13 @@
+import AppKit
 import SwiftUI
 
 struct ContentView: View {
     @StateObject private var renderer = FractalRenderer()
     @StateObject private var recorder = FractalRecorder()
+    // Env-var gated like the other headless diagnostics (see App.swift):
+    // lets verification screenshot the Help sheet without needing
+    // accessibility permissions to click the toolbar button.
+    @State private var showingHelp = ProcessInfo.processInfo.environment["AUTO_OPEN_HELP"] != nil
 
     var body: some View {
         NavigationSplitView {
@@ -27,6 +32,29 @@ struct ContentView: View {
         .navigationTitle("Mandelbrot Explorer")
         .animation(.easeOut(duration: 0.25), value: renderer.isReady)
         .animation(.easeOut(duration: 0.25), value: recorder.isActive)
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    if let url = URL(string: GitHubLink.profileURL) {
+                        NSWorkspace.shared.open(url)
+                    }
+                } label: {
+                    Label("GitHub", systemImage: "chevron.left.forwardslash.chevron.right")
+                }
+                .help("Open GitHub profile")
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    showingHelp = true
+                } label: {
+                    Label("Help", systemImage: "questionmark.circle")
+                }
+                .help("Help & Tutorial")
+            }
+        }
+        .sheet(isPresented: $showingHelp) {
+            HelpView()
+        }
     }
 }
 

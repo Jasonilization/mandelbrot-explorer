@@ -4,7 +4,8 @@ A high-performance, native Mandelbrot Set explorer for Apple Silicon, built
 with Swift, SwiftUI, and Metal. GPU-accelerated compute shaders, adaptive
 render quality, and three automatically-selected precision tiers so you can
 zoom from the full set down to ~10^100+ without the image breaking apart
-into pixelated noise.
+into pixelated noise -- smoothly, progressively, and with a smart auto-zoom
+that steers toward actual detail instead of flat, boring regions.
 
 ## Precision tiers (auto-selected by zoom depth)
 
@@ -17,7 +18,43 @@ into pixelated noise.
    type, with every pixel tracking only its tiny delta from that orbit in
    plain hardware `Double`, multithreaded across all CPU cores. This avoids
    the catastrophic cancellation that breaks naive deep-zoom rendering, so
-   zoom depth is effectively unbounded.
+   zoom depth is effectively unbounded. Two further optimizations keep it
+   fast and responsive:
+   - **Series approximation** fits a small polynomial to the reference
+     orbit so every pixel can skip the leading iterations that are still
+     identical (within tolerance) across the whole frame, instead of
+     iterating from scratch.
+   - **Progressive tiled rendering** splits the image into tiles processed
+     in parallel and streams each one back to the display as it finishes,
+     so a slow deep-zoom render visibly fills in rather than freezing on
+     the old frame until the whole buffer is ready.
+
+## Smart auto-zoom
+
+Auto-zoom doesn't just dive straight ahead -- it periodically scores a grid
+over the last rendered frame for interior/exterior boundary presence and
+iteration-count variation, then eases the zoom pivot toward the most
+detailed cell. If the view goes flat (a big interior lake, a featureless
+exterior) it backs off and sweeps the target around nearby instead of
+zooming straight into it, so a journey stays visually interesting rather
+than needing to be babysat.
+
+## Recording
+
+The sidebar's "Record Zoom Journey" drives that same smart auto-zoom path
+offline, at a fixed simulated frame rate independent of how long each frame
+actually takes to render, and encodes straight to H.264 `.mov` via
+`AVAssetWriter`. Resolution (up to 4K), frame rate, duration, and an
+optional zoom-level overlay are all adjustable. Recording takes over the
+live viewport for its duration (manual interaction pauses) rather than
+running a second, independent render pipeline.
+
+## Help
+
+The toolbar's Help button opens a built-in, beginner-friendly tutorial
+covering what the Mandelbrot set actually is (z → z² + c, inside vs.
+outside, how color encodes escape speed), controls, why deep zoom needs
+perturbation theory, and what each of the three rendering modes does.
 
 ## Requirements
 
@@ -58,18 +95,22 @@ ID for signing + notarization.
 - **Click + drag**: pan
 - **Trackpad pinch**: zoom (bonus, in addition to the wheel)
 - Sidebar: presets, iteration count (auto-scales with zoom unless you
-  override it), color palette, save image
-- Status bar: live coordinates, zoom factor, precision tier, FPS, render time
+  override it), smart auto-zoom, recording, color palette, save image
+- Status bar: live coordinates, zoom factor, rendering-mode indicator, FPS,
+  render time
+- Toolbar: GitHub profile link, built-in Help & Tutorial
 
 ## Project layout
 
 ```
 Sources/MandelbrotExplorer/
-  Model/        Viewport, presets, color palettes, precision-tier selection
-  Precision/    Arbitrary-precision "expansion" arithmetic, reference-orbit
-                and CPU perturbation renderer
+  Model/        Viewport, presets, color palettes, precision-tier selection,
+                auto-zoom interestingness scoring
+  Precision/    Arbitrary-precision "expansion" arithmetic, reference-orbit,
+                series approximation, and the CPU perturbation renderer
   Rendering/    Metal compute shaders + the renderer that drives them
-  Views/        SwiftUI shell (canvas, sidebar, status bar)
+  Recording/    Offline zoom-journey capture to video (AVFoundation)
+  Views/        SwiftUI shell (canvas, sidebar, status bar, help, recording)
   Utils/        Save-image, headless preview/diagnostic tooling
 ```
 
@@ -87,5 +128,8 @@ computation):
   arbitrary-precision computation.
 - `ICON_OUTPUT_PATH=<path>` -- renders the source image used for the app
   icon.
+- `RECORDING_TEST_PATH=<path.mov>` -- records a short clip headlessly and
+  pulls frames back out as PNGs, to catch encoding/orientation/overlay
+  regressions without clicking through the record UI.
 
 None of these run during normal use.
