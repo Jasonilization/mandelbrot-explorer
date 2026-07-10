@@ -82,4 +82,58 @@ enum AutoZoomScoring {
         }
         return best
     }
+
+    /// Same boundary-presence + iteration-variation scoring as `bestTarget`,
+    /// but restricted to a small window around `center` and returning an
+    /// absolute pixel position rather than a normalized whole-frame offset.
+    /// Used by the "lock cursor to detail" manual-zoom assist: it nudges the
+    /// zoom pivot to nearby structure instead of jumping across the frame
+    /// the way full auto-zoom steering does. Returns nil if nothing in the
+    /// window clears the boring threshold, so callers can fall back to the
+    /// raw cursor point.
+    static func bestNearbyPixel(values: [Float], width: Int, height: Int, around center: CGPoint, radiusPixels: Double) -> CGPoint? {
+        guard width >= 6, height >= 6, values.count == width * height, radiusPixels >= 2 else { return nil }
+        let cell = max(2, Int(radiusPixels / 5))
+        let cx = Int(center.x.rounded()), cy = Int(center.y.rounded())
+        let minGX = max(1, (cx - Int(radiusPixels)) / cell)
+        let maxGX = min(width / cell - 2, (cx + Int(radiusPixels)) / cell)
+        let minGY = max(1, (cy - Int(radiusPixels)) / cell)
+        let maxGY = min(height / cell - 2, (cy + Int(radiusPixels)) / cell)
+        guard minGX <= maxGX, minGY <= maxGY else { return nil }
+
+        func sample(_ gx: Int, _ gy: Int) -> Float {
+            let sx = min(width - 1, max(0, gx * cell + cell / 2))
+            let sy = min(height - 1, max(0, gy * cell + cell / 2))
+            return values[sy * width + sx]
+        }
+
+        var best: (score: Double, x: Int, y: Int)?
+        for gy in minGY...maxGY {
+            for gx in minGX...maxGX {
+                let centerValue = sample(gx, gy)
+                let centerIsInterior = centerValue < 0
+                var boundary = 0.0
+                var gradSum = 0.0
+                var gradN = 0.0
+                for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                    let neighbor = sample(gx + dx, gy + dy)
+                    let neighborIsInterior = neighbor < 0
+                    if centerIsInterior != neighborIsInterior {
+                        boundary += 1
+                    } else if !centerIsInterior {
+                        gradSum += Double(abs(centerValue - neighbor))
+                        gradN += 1
+                    }
+                }
+                let boundaryScore = boundary / 4.0
+                let gradientScore = gradN > 0 ? min(1.0, (gradSum / gradN) / 24.0) : 0.0
+                let score = boundaryScore * 2.0 + gradientScore
+                if score >= boringThreshold, best == nil || score > best!.score {
+                    best = (score, gx * cell + cell / 2, gy * cell + cell / 2)
+                }
+            }
+        }
+        guard let best else { return nil }
+        return CGPoint(x: best.x, y: best.y)
+    }
 }

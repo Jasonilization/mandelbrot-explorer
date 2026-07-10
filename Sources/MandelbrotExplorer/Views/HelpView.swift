@@ -109,7 +109,7 @@ struct HelpView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
             LinearGradient(
-                colors: ColorPalette.default.stops.map { Color(red: Double($0.x), green: Double($0.y), blue: Double($0.z)) } + [.black],
+                colors: ColorPalette.default.sortedStops.map(\.color) + [.black],
                 startPoint: .leading, endPoint: .trailing
             )
             .frame(height: 14)

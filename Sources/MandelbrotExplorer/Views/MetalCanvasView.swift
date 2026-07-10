@@ -72,7 +72,8 @@ struct MetalCanvasView: NSViewRepresentable {
             guard !renderer.isInputLocked, deltaY != 0 else { return }
             renderer.markInteractionBegan()
             let factor = pow(1.0035, Double(deltaY) * 6.0)
-            let imageSpacePoint = CGPoint(x: appKitLocation.x, y: viewSize.height - appKitLocation.y)
+            let rawPoint = CGPoint(x: appKitLocation.x, y: viewSize.height - appKitLocation.y)
+            let imageSpacePoint = renderer.detailLockedZoomPivot(for: rawPoint, viewSize: viewSize)
             renderer.viewport.zoom(by: factor, aroundScreenPoint: imageSpacePoint, viewSize: viewSize)
             renderer.markInteractionEnded()
         }
@@ -81,7 +82,8 @@ struct MetalCanvasView: NSViewRepresentable {
             guard !renderer.isInputLocked else { return }
             renderer.markInteractionBegan()
             let factor = max(0.05, 1.0 + delta)
-            let imageSpacePoint = CGPoint(x: appKitLocation.x, y: viewSize.height - appKitLocation.y)
+            let rawPoint = CGPoint(x: appKitLocation.x, y: viewSize.height - appKitLocation.y)
+            let imageSpacePoint = renderer.detailLockedZoomPivot(for: rawPoint, viewSize: viewSize)
             renderer.viewport.zoom(by: factor, aroundScreenPoint: imageSpacePoint, viewSize: viewSize)
             renderer.markInteractionEnded()
         }

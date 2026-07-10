@@ -102,4 +102,26 @@ struct SeriesApproximation {
         }
         return cmul(dc, acc)
     }
+
+    /// Evaluate d(δz)/d(δc) at `skipIterations`, analytically differentiating
+    /// the same power series `evaluate` uses (term j·A^(j)·δc^(j-1)). Since
+    /// z_n = Z_n + δz_n and the reference orbit Z_n doesn't depend on the
+    /// per-pixel δc at all, this is exactly d(z)/d(c) -- what distance
+    /// estimation needs -- without which every pixel would have to seed its
+    /// derivative accumulator at 0 right where SA jumps ahead, silently
+    /// discarding however much sensitivity built up over the skipped
+    /// iterations and making the estimate wildly wrong at any real depth.
+    @inline(__always) func evaluateDerivative(dcRe: Double, dcIm: Double) -> SIMD2<Double> {
+        guard !coefficients.isEmpty else { return SIMD2(0, 0) }
+        let dc = SIMD2(dcRe, dcIm)
+        let lastIndex = coefficients.count - 1
+        var acc = SIMD2(Double(lastIndex + 1) * coefficients[lastIndex].x, Double(lastIndex + 1) * coefficients[lastIndex].y)
+        var i = lastIndex - 1
+        while i >= 0 {
+            let term = SIMD2(Double(i + 1) * coefficients[i].x, Double(i + 1) * coefficients[i].y)
+            acc = cadd(term, cmul(dc, acc))
+            i -= 1
+        }
+        return acc
+    }
 }

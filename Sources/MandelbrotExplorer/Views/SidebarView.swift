@@ -5,6 +5,8 @@ struct SidebarView: View {
     @ObservedObject var recorder: FractalRecorder
     @State private var iterationsText: String = ""
     @State private var showingRecorder = false
+    @State private var showingPaletteEditor = false
+    @State private var exportResolution: ExportResolution = .default
 
     var body: some View {
         Form {
@@ -67,6 +69,19 @@ struct SidebarView: View {
                             .foregroundStyle(.secondary)
                     }
                 }
+
+                Picker("Render Resolution", selection: $renderer.renderResolution) {
+                    ForEach(RenderResolution.allCases) { res in
+                        Text(res.rawValue).tag(res)
+                    }
+                }
+                .help("Internal render scale for the live canvas, independent of window size. Below native trades sharpness for frame rate; above native supersamples for a crisper still image.")
+            }
+
+            Section("Interaction") {
+                Toggle("Lock Cursor to Detail", isOn: $renderer.isCursorLockEnabled)
+                    .disabled(renderer.isInputLocked)
+                    .help("While on, scrolling or pinching to zoom nudges the zoom point from your literal cursor position onto the most detailed nearby boundary structure, so you don't need pixel-perfect aim.")
             }
 
             Section("Auto Zoom") {
@@ -104,12 +119,31 @@ struct SidebarView: View {
             }
 
             Section("Color") {
+                PaletteGradientPreview(palette: renderer.palette)
+                    .help("Live preview of the active palette's gradient cycle.")
+
                 Picker("Palette", selection: $renderer.palette) {
-                    ForEach(ColorPalette.all) { p in
-                        Text(p.name).tag(p)
+                    if !renderer.customPalettes.isEmpty {
+                        Section("Custom") {
+                            ForEach(renderer.customPalettes) { p in
+                                Text(p.name).tag(p)
+                            }
+                        }
+                    }
+                    Section("Presets") {
+                        ForEach(ColorPalette.all) { p in
+                            Text(p.name).tag(p)
+                        }
                     }
                 }
                 .pickerStyle(.menu)
+
+                Button {
+                    showingPaletteEditor = true
+                } label: {
+                    Label("Edit Palette…", systemImage: "slider.horizontal.below.square.filled.and.square")
+                }
+                .help("Add, remove, or reposition color stops; adjust hue/saturation/brightness; save as a custom palette.")
 
                 VStack(alignment: .leading) {
                     Text("Color Scale")
@@ -119,11 +153,78 @@ struct SidebarView: View {
                     Text("Color Offset")
                     Slider(value: $renderer.colorOffset, in: 0...1)
                 }
+
+                Picker("Color Mode", selection: $renderer.colorMode) {
+                    ForEach(ColorMode.allCases) { mode in
+                        Text(mode.label).tag(mode)
+                    }
+                }
+                .help(renderer.colorMode.helpText)
+
+                if renderer.colorMode == .escapeTime {
+                    Toggle("Smooth Coloring", isOn: $renderer.smoothingEnabled)
+                        .help("Continuous gradient (on) vs. classic discrete iteration bands (off).")
+                }
+
+                if renderer.colorMode == .orbitTrap {
+                    Picker("Trap Shape", selection: $renderer.orbitTrap.type) {
+                        ForEach(OrbitTrapType.allCases) { type in
+                            Text(type.label).tag(type)
+                        }
+                    }
+                    .help("Shape the orbit's distance is measured against -- circle, line, cross, or a custom point.")
+
+                    switch renderer.orbitTrap.type {
+                    case .circle:
+                        VStack(alignment: .leading) {
+                            Text("Trap Radius")
+                            Slider(value: $renderer.orbitTrap.scale, in: 0.02...1.5)
+                        }
+                    case .line:
+                        VStack(alignment: .leading) {
+                            Text("Trap Angle")
+                            Slider(value: $renderer.orbitTrap.angleDegrees, in: 0...180)
+                        }
+                    case .cross:
+                        EmptyView()
+                    case .custom:
+                        VStack(alignment: .leading) {
+                            Text("Trap Position")
+                            HStack {
+                                Slider(value: $renderer.orbitTrap.customX, in: -2...2)
+                                Slider(value: $renderer.orbitTrap.customY, in: -2...2)
+                            }
+                        }
+                    }
+                }
+
+                Toggle("Surface Shading", isOn: $renderer.shadingEnabled)
+                    .help("Adds cheap relief-style lighting derived from the color field's local gradient, so boundary structure reads as more three-dimensional.")
+
+                if renderer.shadingEnabled {
+                    VStack(alignment: .leading) {
+                        Text("Light Direction")
+                        Slider(value: $renderer.lightAzimuthDegrees, in: 0...360)
+                    }
+                    VStack(alignment: .leading) {
+                        Text("Light Elevation")
+                        Slider(value: $renderer.lightElevationDegrees, in: 5...90)
+                    }
+                    VStack(alignment: .leading) {
+                        Text("Shading Strength")
+                        Slider(value: $renderer.shadingStrength, in: 0.5...20)
+                    }
+                }
             }
 
             Section("Export") {
+                Picker("Resolution", selection: $exportResolution) {
+                    ForEach(ExportResolution.all) { res in
+                        Text(res.label).tag(res)
+                    }
+                }
                 Button {
-                    SaveImageAction.run(renderer: renderer)
+                    SaveImageAction.run(renderer: renderer, resolution: exportResolution)
                 } label: {
                     Label("Save Image…", systemImage: "square.and.arrow.down")
                 }
@@ -133,6 +234,9 @@ struct SidebarView: View {
         .frame(minWidth: 260, idealWidth: 280)
         .sheet(isPresented: $showingRecorder) {
             RecordingView(renderer: renderer, recorder: recorder)
+        }
+        .sheet(isPresented: $showingPaletteEditor) {
+            PaletteEditorView(renderer: renderer)
         }
     }
 }

@@ -15,6 +15,9 @@ struct MandelbrotExplorerApp: App {
         if let path = ProcessInfo.processInfo.environment["RECORDING_TEST_PATH"] {
             PresetPreviewTool.runRecordingTest(outputPath: path)
         }
+        if let dir = ProcessInfo.processInfo.environment["COLOR_MODE_TEST_DIR"] {
+            PresetPreviewTool.runColorModeTest(outputDir: dir)
+        }
     }
 
     var body: some Scene {

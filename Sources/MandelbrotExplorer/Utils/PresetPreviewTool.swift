@@ -141,6 +141,69 @@ enum PresetPreviewTool {
         FileHandle.standardError.write((s + "\n").data(using: .utf8)!)
     }
 
+    /// Headless correctness check for the color engine: renders the same
+    /// view under every `ColorMode`/orbit trap shape/shading combination, at
+    /// both a GPU-tier zoom and a perturbation-tier (CPU) zoom, so a broken
+    /// color mode on either path shows up as a visibly wrong PNG rather than
+    /// requiring someone to click through every sidebar control by hand.
+    /// Activated by COLOR_MODE_TEST_DIR.
+    static func runColorModeTest(outputDir: String) {
+        try? FileManager.default.createDirectory(atPath: outputDir, withIntermediateDirectories: true)
+        let renderer = FractalRenderer()
+        waitUntilReady(renderer)
+        let size = CGSize(width: 480, height: 300)
+
+        func capture(_ name: String, configure: () -> Void) {
+            configure()
+            var done = false
+            renderer.captureFullQualityImage(size: size) { image in
+                defer { done = true }
+                guard let image else { logErr("FAILED \(name)"); return }
+                let rep = NSBitmapImageRep(cgImage: image)
+                if let data = rep.representation(using: .png, properties: [:]) {
+                    try? data.write(to: URL(fileURLWithPath: "\(outputDir)/\(name).png"))
+                    logErr("wrote \(name)")
+                }
+            }
+            let deadline = Date().addingTimeInterval(60)
+            while !done && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+            if !done { logErr("TIMEOUT \(name)") }
+        }
+
+        if let seahorse = Preset.all.first(where: { $0.id == "seahorse" }) {
+            renderer.viewport = seahorse.makeViewport()
+            renderer.maxIterations = seahorse.suggestedIterations
+        }
+        capture("gpu_escape_smooth") { renderer.colorMode = .escapeTime; renderer.smoothingEnabled = true; renderer.shadingEnabled = false }
+        capture("gpu_escape_banded") { renderer.smoothingEnabled = false }
+        capture("gpu_escape_shaded") { renderer.smoothingEnabled = true; renderer.shadingEnabled = true }
+        capture("gpu_distance_estimation") { renderer.shadingEnabled = false; renderer.colorMode = .distanceEstimation }
+        capture("gpu_orbit_trap_circle") { renderer.colorMode = .orbitTrap; renderer.orbitTrap = OrbitTrapSettings(type: .circle) }
+        capture("gpu_orbit_trap_line") { renderer.orbitTrap = OrbitTrapSettings(type: .line, angleDegrees: 30) }
+        capture("gpu_orbit_trap_cross") { renderer.orbitTrap = OrbitTrapSettings(type: .cross) }
+        capture("gpu_orbit_trap_custom") { renderer.orbitTrap = OrbitTrapSettings(type: .custom, customX: 0.3, customY: 0.2) }
+        capture("gpu_orbit_trap_shaded") { renderer.shadingEnabled = true }
+
+        if let full = Preset.all.first(where: { $0.id == "full" }) {
+            renderer.viewport = full.makeViewport()
+            renderer.maxIterations = 400
+        }
+        capture("gpu_fullview_orbit_trap_small_circle") { renderer.colorMode = .orbitTrap; renderer.orbitTrap = OrbitTrapSettings(type: .circle, scale: 0.15); renderer.shadingEnabled = false }
+        capture("gpu_fullview_orbit_trap_cross") { renderer.orbitTrap = OrbitTrapSettings(type: .cross) }
+
+        if let deep = Preset.all.first(where: { $0.id == "seahorse-deep" }) {
+            renderer.viewport = deep.makeViewport()
+            renderer.maxIterations = deep.suggestedIterations
+        }
+        capture("perturbation_escape_smooth") { renderer.colorMode = .escapeTime; renderer.smoothingEnabled = true; renderer.shadingEnabled = false }
+        capture("perturbation_distance_estimation") { renderer.colorMode = .distanceEstimation }
+        capture("perturbation_orbit_trap") { renderer.colorMode = .orbitTrap; renderer.orbitTrap = OrbitTrapSettings(type: .circle) }
+        capture("perturbation_orbit_trap_cross") { renderer.orbitTrap = OrbitTrapSettings(type: .cross) }
+
+        logErr("DONE")
+        exit(0)
+    }
+
     /// Renders a square, high-color-contrast crop for use as the app icon.
     static func renderIcon(to path: String) {
         let renderer = FractalRenderer()

@@ -13,8 +13,33 @@ final class FractalRenderer: NSObject, ObservableObject, MTKViewDelegate {
     /// auto-zoom toggle so the two never fight over the same camera state.
     @Published var isInputLocked: Bool = false
     @Published var palette: ColorPalette = .default { didSet { rebuildStopsBuffer(); wake() } }
+    @Published var customPalettes: [ColorPalette] = PaletteStore.load() { didSet { PaletteStore.save(customPalettes); wake() } }
     @Published var colorScale: Float = 1.0 { didSet { wake() } }
     @Published var colorOffset: Float = 0.0 { didSet { wake() } }
+
+    /// Which per-pixel scalar drives the palette -- see `ColorMode`.
+    @Published var colorMode: ColorMode = .escapeTime { didSet { wake() } }
+    /// Escape-time only: continuous vs. banded integer iteration count.
+    @Published var smoothingEnabled: Bool = true { didSet { wake() } }
+    @Published var orbitTrap: OrbitTrapSettings = .default { didSet { wake() } }
+    @Published var shadingEnabled: Bool = false { didSet { wake() } }
+    @Published var lightAzimuthDegrees: Double = 135 { didSet { wake() } }
+    @Published var lightElevationDegrees: Double = 45 { didSet { wake() } }
+    @Published var shadingStrength: Double = 6.0 { didSet { wake() } }
+
+    /// Internal render scale for the live canvas, independent of window size
+    /// -- see `RenderResolution`. Applied at rest; during active pan/zoom the
+    /// existing adaptive `qualityScale` still takes over for responsiveness.
+    @Published var renderResolution: RenderResolution = .native { didSet { wake() } }
+
+    /// While true, manual scroll/pinch zoom nudges its pivot point from the
+    /// raw cursor position onto the most detailed nearby structure (reusing
+    /// auto-zoom's boundary/gradient scoring), so zooming into fine boundary
+    /// detail doesn't require pixel-perfect cursor placement.
+    @Published var isCursorLockEnabled: Bool = false
+
+    private var cursorLockSnapshotCache: (values: [Float], width: Int, height: Int)?
+    private var cursorLockSnapshotTime: CFTimeInterval = -1
 
     /// True while iteration count should auto-track zoom depth (the default,
     /// "just zoom and it stays sharp" experience). Cleared the moment the
@@ -100,6 +125,7 @@ final class FractalRenderer: NSObject, ObservableObject, MTKViewDelegate {
 
     private var iterationTexture: MTLTexture?
     private var stopsBuffer: MTLBuffer?
+    private var stopPositionsBuffer: MTLBuffer?
 
     /// The app renders on demand rather than at a constant frame rate: idle
     /// scenes cost ~0% CPU/GPU, matching "smooth while moving, efficient at
@@ -182,11 +208,17 @@ final class FractalRenderer: NSObject, ObservableObject, MTKViewDelegate {
     }
 
     private func rebuildStopsBuffer() {
-        var colors = palette.stops
-        colors.append(palette.interiorColor)
+        let sorted = palette.sortedStops
+        let colors = sorted.map(\.simd)
+        let positions = sorted.map { Float($0.position) }
         stopsBuffer = device.makeBuffer(
             bytes: colors,
             length: MemoryLayout<SIMD3<Float>>.stride * colors.count,
+            options: .storageModeShared
+        )
+        stopPositionsBuffer = device.makeBuffer(
+            bytes: positions,
+            length: MemoryLayout<Float>.stride * positions.count,
             options: .storageModeShared
         )
     }
@@ -410,6 +442,34 @@ final class FractalRenderer: NSObject, ObservableObject, MTKViewDelegate {
         isAutoZoomSearching = false
     }
 
+    /// While `isCursorLockEnabled`, nudges a manual zoom's pivot point from
+    /// the raw cursor position onto the most detailed nearby structure
+    /// instead of requiring pixel-perfect cursor placement. `point` and
+    /// `viewSize` are both in the view's point space (top-left origin, +y
+    /// down) -- the same convention `Viewport.zoom(aroundScreenPoint:viewSize:)`
+    /// expects, and the same one `imageSpacePoint` in `MetalCanvasView`
+    /// already uses. The underlying texture snapshot is cached briefly
+    /// (rather than read back on every single scroll-wheel tick) since
+    /// scroll events can fire far faster than the render loop refreshes it.
+    func detailLockedZoomPivot(for point: CGPoint, viewSize: CGSize) -> CGPoint {
+        guard isCursorLockEnabled, viewSize.width > 1, viewSize.height > 1 else { return point }
+        let now = CACurrentMediaTime()
+        if cursorLockSnapshotTime < 0 || now - cursorLockSnapshotTime > 0.08 {
+            cursorLockSnapshotCache = currentIterationSnapshot()
+            cursorLockSnapshotTime = now
+        }
+        guard let snapshot = cursorLockSnapshotCache else { return point }
+        let ratioX = Double(snapshot.width) / Double(viewSize.width)
+        let ratioY = Double(snapshot.height) / Double(viewSize.height)
+        let texPoint = CGPoint(x: point.x * ratioX, y: point.y * ratioY)
+        let radius = min(Double(snapshot.width), Double(snapshot.height)) * 0.05
+        guard let best = AutoZoomScoring.bestNearbyPixel(
+            values: snapshot.values, width: snapshot.width, height: snapshot.height,
+            around: texPoint, radiusPixels: radius
+        ) else { return point }
+        return CGPoint(x: best.x / ratioX, y: best.y / ratioY)
+    }
+
     /// Cheap CPU-side copy of the texture that was actually presented last
     /// frame -- called from the top of `draw(in:)` before this frame's own
     /// render is encoded, so there's no race with the GPU still writing it.
@@ -430,6 +490,17 @@ final class FractalRenderer: NSObject, ObservableObject, MTKViewDelegate {
         if recentFrameTimesMs.count > 30 { recentFrameTimesMs.removeFirst() }
         let avgMs = recentFrameTimesMs.reduce(0, +) / Double(recentFrameTimesMs.count)
         fps = avgMs > 0 ? 1000.0 / avgMs : 0
+    }
+
+    /// Maps `orbitTrap` into the raw (type, paramX, paramY) triple both the
+    /// Metal kernels and `Perturbation.render` expect.
+    private var trapShaderParams: (type: UInt32, x: Float, y: Float) {
+        switch orbitTrap.type {
+        case .circle: (OrbitTrapType.circle.rawValue, Float(orbitTrap.scale), 0)
+        case .line: (OrbitTrapType.line.rawValue, Float(orbitTrap.angleDegrees * .pi / 180), 0)
+        case .cross: (OrbitTrapType.cross.rawValue, 0, 0)
+        case .custom: (OrbitTrapType.custom.rawValue, Float(orbitTrap.customX), Float(orbitTrap.customY))
+        }
     }
 
     private func adjustQualityScale(lastFrameMs: Double) {
@@ -453,7 +524,7 @@ final class FractalRenderer: NSObject, ObservableObject, MTKViewDelegate {
         // Stale from a previous perturbation render; irrelevant on the GPU tiers.
         if seriesApproximationSkip != 0 { seriesApproximationSkip = 0 }
         if referenceOrbitIterations != 0 { referenceOrbitIterations = 0 }
-        let scale = isAnimating ? qualityScale : 1.0
+        let scale = isAnimating ? qualityScale : renderResolution.scale
         let renderW = max(8, Int(drawableSize.width * scale))
         let renderH = max(8, Int(drawableSize.height * scale))
         renderWidth = renderW
@@ -467,6 +538,7 @@ final class FractalRenderer: NSObject, ObservableObject, MTKViewDelegate {
         let centerApprox = viewport.centerApprox
         let (hiRe, loRe) = splitDoubleToFloatPair(centerApprox.x)
         let (hiIm, loIm) = splitDoubleToFloatPair(centerApprox.y)
+        let trap = trapShaderParams
         var params = FractalParams(
             centerHi: SIMD2(hiRe, hiIm),
             centerLo: SIMD2(loRe, loIm),
@@ -475,7 +547,12 @@ final class FractalRenderer: NSObject, ObservableObject, MTKViewDelegate {
             width: UInt32(renderW),
             height: UInt32(renderH),
             maxIterations: UInt32(iterations),
-            escapeRadiusSq: 256.0
+            escapeRadiusSq: 256.0,
+            colorMode: colorMode.rawValue,
+            smoothingEnabled: smoothingEnabled ? 1 : 0,
+            trapType: trap.type,
+            trapParamX: trap.x,
+            trapParamY: trap.y
         )
 
         guard let commandBuffer = queue.makeCommandBuffer() else { return }
@@ -506,13 +583,13 @@ final class FractalRenderer: NSObject, ObservableObject, MTKViewDelegate {
         guard let drawable = view.currentDrawable else { return }
 
         let targetLongEdge: Double = 1500
-        let baseScale = min(1.0, targetLongEdge / max(drawableSize.width, drawableSize.height))
+        let baseScale = min(1.0, targetLongEdge / max(drawableSize.width, drawableSize.height)) * renderResolution.scale
         let scale = (isAnimating ? min(baseScale, 0.4) : baseScale)
         let renderW = max(8, Int(drawableSize.width * scale))
         let renderH = max(8, Int(drawableSize.height * scale))
 
         let iterations = isAnimating ? min(maxIterations, 300) : maxIterations
-        let signature = "\(viewport.center.re.terms)|\(viewport.center.im.terms)|\(viewport.spanX)|\(iterations)|\(renderW)x\(renderH)"
+        let signature = "\(viewport.center.re.terms)|\(viewport.center.im.terms)|\(viewport.spanX)|\(iterations)|\(renderW)x\(renderH)|\(colorMode.rawValue)|\(smoothingEnabled)|\(orbitTrap)"
 
         if signature != lastPerturbationSignature && !perturbationBusy {
             lastPerturbationSignature = signature
@@ -554,6 +631,9 @@ final class FractalRenderer: NSObject, ObservableObject, MTKViewDelegate {
         let centerDeep = viewport.center
         let pixelSize = viewport.spanX / Double(width)
         let precision = viewport.precisionTerms
+        let colorMode = self.colorMode
+        let smoothingEnabled = self.smoothingEnabled
+        let orbitTrap = self.orbitTrap
 
         Task.detached(priority: .userInitiated) { [weak self] in
             let result = Perturbation.render(
@@ -564,6 +644,9 @@ final class FractalRenderer: NSObject, ObservableObject, MTKViewDelegate {
                 maxIterations: iterations,
                 escapeRadius: 16.0,
                 precision: precision,
+                colorMode: colorMode,
+                smoothingEnabled: smoothingEnabled,
+                trap: orbitTrap,
                 onTileComplete: { tile in
                     Task { @MainActor [weak self] in
                         guard let self, generation == self.perturbationGeneration else { return }
@@ -637,11 +720,12 @@ final class FractalRenderer: NSObject, ObservableObject, MTKViewDelegate {
     }
 
     private func encodePalette(commandBuffer: MTLCommandBuffer, source: MTLTexture, destination: MTLTexture, sourceSize: (Int, Int)) {
-        guard let stopsBuffer, let pipelinePalette else { return }
+        guard let stopsBuffer, let stopPositionsBuffer, let pipelinePalette else { return }
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
         encoder.setComputePipelineState(pipelinePalette)
         encoder.setTexture(source, index: 0)
         encoder.setTexture(destination, index: 1)
+        let interior = palette.interiorColor
         var params = PaletteParams(
             stopCount: UInt32(palette.stops.count),
             colorScale: colorScale,
@@ -649,10 +733,18 @@ final class FractalRenderer: NSObject, ObservableObject, MTKViewDelegate {
             sourceWidth: UInt32(sourceSize.0),
             sourceHeight: UInt32(sourceSize.1),
             outWidth: UInt32(destination.width),
-            outHeight: UInt32(destination.height)
+            outHeight: UInt32(destination.height),
+            interiorR: Float(interior.red),
+            interiorG: Float(interior.green),
+            interiorB: Float(interior.blue),
+            shadingEnabled: shadingEnabled ? 1 : 0,
+            lightAzimuth: Float(lightAzimuthDegrees * .pi / 180),
+            lightElevation: Float(lightElevationDegrees * .pi / 180),
+            shadingStrength: Float(shadingStrength)
         )
         encoder.setBytes(&params, length: MemoryLayout<PaletteParams>.stride, index: 0)
         encoder.setBuffer(stopsBuffer, offset: 0, index: 1)
+        encoder.setBuffer(stopPositionsBuffer, offset: 0, index: 2)
         dispatch(encoder: encoder, pipeline: pipelinePalette, width: destination.width, height: destination.height)
         encoder.endEncoding()
     }
@@ -694,11 +786,15 @@ final class FractalRenderer: NSObject, ObservableObject, MTKViewDelegate {
             let centerApprox = viewport.centerApprox
             let (hiRe, loRe) = splitDoubleToFloatPair(centerApprox.x)
             let (hiIm, loIm) = splitDoubleToFloatPair(centerApprox.y)
+            let trap = trapShaderParams
             var params = FractalParams(
                 centerHi: SIMD2(hiRe, hiIm), centerLo: SIMD2(loRe, loIm),
                 spanX: Float(viewport.spanX), aspect: Float(height) / Float(width),
                 width: UInt32(width), height: UInt32(height),
-                maxIterations: UInt32(maxIterations), escapeRadiusSq: 256.0
+                maxIterations: UInt32(maxIterations), escapeRadiusSq: 256.0,
+                colorMode: colorMode.rawValue,
+                smoothingEnabled: smoothingEnabled ? 1 : 0,
+                trapType: trap.type, trapParamX: trap.x, trapParamY: trap.y
             )
             guard let pipeline = tier == .float32 ? pipelineFloat32 : pipelineDD else { completion(nil); return }
             guard let cb = queue.makeCommandBuffer(), let encoder = cb.makeComputeCommandEncoder() else { completion(nil); return }
@@ -719,11 +815,15 @@ final class FractalRenderer: NSObject, ObservableObject, MTKViewDelegate {
             let pixelSize = viewport.spanX / Double(width)
             let precision = viewport.precisionTerms
             let iterations = maxIterations
+            let colorMode = self.colorMode
+            let smoothingEnabled = self.smoothingEnabled
+            let orbitTrap = self.orbitTrap
             Task.detached(priority: .userInitiated) {
                 let result = Perturbation.render(
                     centerDeep: centerDeep, pixelSize: pixelSize,
                     width: width, height: height,
-                    maxIterations: iterations, escapeRadius: 16.0, precision: precision
+                    maxIterations: iterations, escapeRadius: 16.0, precision: precision,
+                    colorMode: colorMode, smoothingEnabled: smoothingEnabled, trap: orbitTrap
                 )
                 await MainActor.run { completion(result.values) }
             }

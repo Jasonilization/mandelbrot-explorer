@@ -49,6 +49,28 @@ enum Perturbation {
     /// paint it) stays negligible next to the per-pixel iteration cost.
     private static let tileSize = 128
 
+    /// Distance from `(zRe, zIm)` to the chosen orbit trap shape. Mirrors
+    /// `orbitTrapDistance` in Shaders.metal exactly, so GPU and CPU tiers
+    /// produce the same look for the same settings.
+    /// Mirrors `ORBIT_TRAP_COLOR_SCALE` in Shaders.metal -- see that
+    /// constant's comment for why orbit trap values need this.
+    private static let orbitTrapColorScale = 6.0
+
+    private static func trapDistance(zRe: Double, zIm: Double, trap: OrbitTrapSettings) -> Double {
+        switch trap.type {
+        case .circle:
+            return abs((zRe * zRe + zIm * zIm).squareRoot() - trap.scale)
+        case .line:
+            let angle = trap.angleDegrees * .pi / 180
+            return abs(zRe * sin(angle) - zIm * cos(angle))
+        case .cross:
+            return min(abs(zRe), abs(zIm))
+        case .custom:
+            let dx = zRe - trap.customX, dy = zIm - trap.customY
+            return (dx * dx + dy * dy).squareRoot()
+        }
+    }
+
     static func render(
         centerDeep: ComplexExpansion,
         pixelSize: Double,
@@ -57,6 +79,9 @@ enum Perturbation {
         maxIterations: Int,
         escapeRadius: Double,
         precision: Int,
+        colorMode: ColorMode = .escapeTime,
+        smoothingEnabled: Bool = true,
+        trap: OrbitTrapSettings = .default,
         isCancelled: @Sendable () -> Bool = { false },
         onTileComplete: (@Sendable (TileUpdate) -> Void)? = nil
     ) -> Result {
@@ -113,6 +138,26 @@ enum Perturbation {
                 firstRoundOrbitLength = refCount
             }
 
+            // Orbit trap's per-pixel loop only walks the reference orbit
+            // from `sa.skipIterations` onward (like everything else, via SA).
+            // The skipped prefix is -- by construction -- nearly identical
+            // for every pixel, so its trap contribution is one shared
+            // constant, computed once here from the reference orbit itself
+            // rather than per pixel. Without this, a trap shape close to the
+            // origin (where the orbit always starts) would be invisible
+            // behind whatever larger minimum the much-shorter post-skip tail
+            // happens to find.
+            var sharedTrapDist = Double.greatestFiniteMagnitude
+            if colorMode == .orbitTrap, sa.skipIterations > 0 {
+                // i=0 excluded: the reference orbit's z_0 is exactly (0,0),
+                // which trivially lies on a cross/line trap's origin-crossing
+                // shape -- see the matching guard in the per-pixel loop below.
+                for i in 1..<sa.skipIterations {
+                    let Z = refPoints[i]
+                    sharedTrapDist = min(sharedTrapDist, trapDistance(zRe: Z.x, zIm: Z.y, trap: trap))
+                }
+            }
+
             // Core per-pixel recurrence, shared by both the tiled first pass
             // and the flat glitch-retry passes below. δz starts wherever SA
             // leaves off instead of at n=0 -- everything before that point
@@ -123,11 +168,21 @@ enum Perturbation {
 
                 var dzRe = 0.0, dzIm = 0.0
                 var n = 0
+                // Coloring-only accumulators -- see `evaluateDerivative` and
+                // `sharedTrapDist` above for why these need SA-aware seeding
+                // rather than starting from scratch at the skip point.
+                var derivRe = 0.0, derivIm = 0.0
+                var trapDist = sharedTrapDist
                 if sa.skipIterations > 0 {
                     let z0 = sa.evaluate(dcRe: dcRe, dcIm: dcIm)
                     dzRe = z0.x
                     dzIm = z0.y
                     n = sa.skipIterations
+                    if colorMode == .distanceEstimation {
+                        let d0 = sa.evaluateDerivative(dcRe: dcRe, dcIm: dcIm)
+                        derivRe = d0.x
+                        derivIm = d0.y
+                    }
                 }
 
                 var glitched = false
@@ -155,6 +210,20 @@ enum Perturbation {
                         glitched = true
                         break
                     }
+
+                    // n > 0: see the matching guard in Shaders.metal -- z at
+                    // n=0 is always exactly (0,0), a trivial hit for any
+                    // origin-crossing trap shape.
+                    if colorMode == .orbitTrap, n > 0 {
+                        trapDist = min(trapDist, trapDistance(zRe: zRe, zIm: zIm, trap: trap))
+                    }
+                    if colorMode == .distanceEstimation {
+                        let newDerivRe = 2 * (zRe * derivRe - zIm * derivIm) + 1
+                        let newDerivIm = 2 * (zRe * derivIm + zIm * derivRe)
+                        derivRe = newDerivRe
+                        derivIm = newDerivIm
+                    }
+
                     let newDzRe = 2 * (Z.x * dzRe - Z.y * dzIm) + (dzRe * dzRe - dzIm * dzIm) + dcRe
                     let newDzIm = 2 * (Z.x * dzIm + Z.y * dzRe) + 2 * dzRe * dzIm + dcIm
                     dzRe = newDzRe
@@ -169,11 +238,34 @@ enum Perturbation {
                 if glitched {
                     return (-1, true)
                 } else if escaped {
-                    let logZn = log(finalMag2) * 0.5
-                    let nu = log(logZn / log(2)) / log(2)
-                    return (Float(Double(n) + 1 - nu), false)
+                    switch colorMode {
+                    case .escapeTime:
+                        if smoothingEnabled {
+                            let logZn = log(finalMag2) * 0.5
+                            let nu = log(logZn / log(2)) / log(2)
+                            return (Float(Double(n) + 1 - nu), false)
+                        } else {
+                            return (Float(n), false)
+                        }
+                    case .distanceEstimation:
+                        let derivMag = (derivRe * derivRe + derivIm * derivIm).squareRoot()
+                        let zMag = finalMag2.squareRoot()
+                        let de = derivMag > 1e-20 ? 0.5 * zMag * log(zMag) / derivMag : 0.0
+                        // Normalized by pixel size, not an absolute epsilon --
+                        // see the matching comment in Shaders.metal. At deep
+                        // zoom `pixelSize` itself is astronomically small, so
+                        // an absolute floor here would clamp every pixel in
+                        // the frame to the same flat value.
+                        return (Float(-log(max(de / pixelSize, 1e-6))), false)
+                    case .orbitTrap:
+                        return (Float(trapDist * Perturbation.orbitTrapColorScale), false)
+                    }
                 } else {
-                    return (-1, false)
+                    // Never escaped (interior/bounded). Orbit trap coloring
+                    // paints the whole set, not just the boundary, so it
+                    // gets a real value here too; the other modes keep the
+                    // flat interior-color sentinel.
+                    return (colorMode == .orbitTrap ? Float(trapDist * Perturbation.orbitTrapColorScale) : -1, false)
                 }
             }
 
