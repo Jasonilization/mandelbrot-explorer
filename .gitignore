@@ -1,9 +1,9 @@
-.venv/
-__pycache__/
-*.pyc
 .DS_Store
 /dist/
-/build/pyinstaller-work/
-*.egg-info/
-.pytest_cache/
 screenshots/
+
+# Swift Package Manager
+.build/
+.swiftpm/
+*.xcodeproj
+Package.resolved
