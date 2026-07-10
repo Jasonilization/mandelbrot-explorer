@@ -161,7 +161,7 @@ final class FractalRenderer: NSObject, ObservableObject, MTKViewDelegate {
     private func buildPipelinesAsync() {
         let device = self.device
         Task.detached(priority: .userInitiated) { [weak self] in
-            let source = FractalRenderer.loadShaderSource()
+            let source = ShaderSource.load()
             do {
                 // Fast-math defaults to on and permits reassociating/contracting
                 // float ops. The double-double kernel's two-sum/two-prod error
@@ -194,18 +194,6 @@ final class FractalRenderer: NSObject, ObservableObject, MTKViewDelegate {
         }
     }
 
-    private nonisolated static func loadShaderSource() -> String {
-        let candidates: [URL?] = [
-            Bundle.module.url(forResource: "Shaders", withExtension: "metal"),
-            Bundle.module.url(forResource: "Shaders", withExtension: "metal", subdirectory: "Rendering"),
-        ]
-        for candidate in candidates {
-            if let url = candidate, let text = try? String(contentsOf: url, encoding: .utf8) {
-                return text
-            }
-        }
-        fatalError("Could not locate Shaders.metal resource.")
-    }
 
     private func rebuildStopsBuffer() {
         let sorted = palette.sortedStops

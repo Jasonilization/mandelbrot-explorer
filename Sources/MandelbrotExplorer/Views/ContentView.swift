@@ -33,24 +33,7 @@ struct ContentView: View {
         .animation(.easeOut(duration: 0.25), value: renderer.isReady)
         .animation(.easeOut(duration: 0.25), value: recorder.isActive)
         .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    if let url = URL(string: GitHubLink.profileURL) {
-                        NSWorkspace.shared.open(url)
-                    }
-                } label: {
-                    Label("GitHub", systemImage: "chevron.left.forwardslash.chevron.right")
-                }
-                .help("Open GitHub profile")
-            }
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    showingHelp = true
-                } label: {
-                    Label("Help", systemImage: "questionmark.circle")
-                }
-                .help("Help & Tutorial")
-            }
+            AppToolbarButtons(showingHelp: $showingHelp)
         }
         .sheet(isPresented: $showingHelp) {
             HelpView()

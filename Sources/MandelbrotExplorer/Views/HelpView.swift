@@ -13,6 +13,8 @@ struct HelpView: View {
         case controls = "Controls"
         case deepZoom = "Deep Zoom & Precision"
         case renderingModes = "Rendering Modes"
+        case colorEngine = "Color Engine"
+        case mandelbulb = "Mandelbulb Explorer"
         case about = "About"
 
         var id: String { rawValue }
@@ -22,6 +24,8 @@ struct HelpView: View {
             case .controls: "hand.draw"
             case .deepZoom: "magnifyingglass"
             case .renderingModes: "cpu"
+            case .colorEngine: "paintpalette"
+            case .mandelbulb: "cube.transparent"
             case .about: "info.circle"
             }
         }
@@ -58,6 +62,8 @@ struct HelpView: View {
         case .controls: controlsContent
         case .deepZoom: deepZoomContent
         case .renderingModes: renderingModesContent
+        case .colorEngine: colorEngineContent
+        case .mandelbulb: mandelbulbContent
         case .about: aboutContent
         }
     }
@@ -209,6 +215,62 @@ struct HelpView: View {
             at a tier boundary, and the CPU tier renders a fast low-resolution preview immediately, \
             filling in full detail progressively rather than freezing the view.
             """)
+        }
+    }
+
+    // MARK: - Color Engine
+
+    private var colorEngineContent: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Heading("Color Engine")
+
+            Paragraph("""
+            The sidebar's Color section controls how the same underlying render data gets turned \
+            into pixels. All of it -- color mode, palette, smoothing, shading -- works identically \
+            whether the current view is on the GPU float32/double-double tiers or the CPU \
+            perturbation tier.
+            """)
+
+            ModeRow(icon: "timer", color: .green, title: "Escape Time",
+                    body: "The classic mode: colors by how many iterations a point takes to escape. Smooth Coloring blends between iterations for a continuous gradient; turning it off shows the classic discrete bands instead.")
+            ModeRow(icon: "ruler", color: .blue, title: "Distance Estimation",
+                    body: "Colors by the estimated distance from each point to the fractal boundary itself, producing crisp contour-like detail that doesn't depend on iteration banding.")
+            ModeRow(icon: "scope", color: .orange, title: "Orbit Trap",
+                    body: "Colors by how closely each point's orbit passes a chosen shape -- circle, line, cross, or a custom point -- painted across the whole set (interior included), which is what gives it a richly patterned, almost woven look.")
+
+            BulletPoint(title: "Palette Editor", body: "Add, remove, and reposition color stops around the gradient; fine-tune each one with a color picker or hue/saturation/brightness sliders; save the result as a custom palette that persists between launches.")
+            BulletPoint(title: "Surface Shading", body: "An optional cheap relief-lighting pass: it builds a fake surface normal from the color field's local gradient and lights it, so boundary and orbit-trap structure read as more three-dimensional.")
+        }
+    }
+
+    // MARK: - Mandelbulb Explorer
+
+    private var mandelbulbContent: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Heading("Mandelbulb Explorer")
+
+            Paragraph("""
+            A separate tab, not a mode of the 2D explorer: a true 3D fractal, generalizing \
+            z → z² + c into three dimensions using spherical coordinates.
+            """)
+
+            FormulaBadge("r, θ, φ → rⁿ · (spherical basis of n·θ, n·φ) + c")
+
+            Paragraph("""
+            Where n is the power (8 for the "classic" Mandelbulb), and r/θ/φ are the point's \
+            distance, inclination, and azimuth. Unlike the 2D explorer's direct pixel-by-pixel \
+            iteration, this shape has no closed-form 2D slice to just draw -- it's rendered by ray \
+            marching: stepping each pixel's ray forward by a distance estimate (derived from the \
+            same iteration) until it's close enough to count as a hit.
+            """)
+
+            ControlRow(icon: "hand.draw", title: "Click and drag", body: "Orbits the camera around the fractal.")
+            ControlRow(icon: "computermouse", title: "Scroll / pinch", body: "Moves the camera closer or farther away.")
+            ControlRow(icon: "arrow.counterclockwise", title: "Reset Camera", body: "Returns to the default framing.")
+
+            BulletPoint(title: "Quality tiers", body: "Low is a fast preview; Medium adds ambient occlusion; High adds soft shadows too; Ultra raises ray-march steps and supersamples. Like the 2D explorer, the view automatically renders at reduced quality while the camera is moving and refines to full quality once it settles.")
+            BulletPoint(title: "Power and variant", body: "Power reshapes the whole fractal -- lower values look more organic, higher values sharper and spikier. The Hollow Variant toggle applies an abs-transform that carves shell-like cavities into the surface.")
+            BulletPoint(title: "Lighting", body: "Direction, elevation, and ambient strength control a simple diffuse light, combined with ambient occlusion and soft self-shadowing when the quality tier allows them.")
         }
     }
 

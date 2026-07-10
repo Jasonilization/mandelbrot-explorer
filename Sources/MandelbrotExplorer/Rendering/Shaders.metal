@@ -355,3 +355,206 @@ kernel void paletteMap(texture2d<float, access::sample> sourceTexture [[texture(
 
     outTexture.write(float4(color, 1.0), gid);
 }
+
+// ---------------------------------------------------------------------------
+// Mandelbulb: 3D ray-marched fractal, a separate explorer sharing this
+// library only for build/compile-pipeline convenience. All-scalar layout for
+// the same reason as `PaletteParams` above (no float3/float4 struct members).
+// ---------------------------------------------------------------------------
+struct MandelbulbParams {
+    float eyeX, eyeY, eyeZ;
+    float rightX, rightY, rightZ;
+    float upX, upY, upZ;
+    float forwardX, forwardY, forwardZ;
+    uint  width;
+    uint  height;
+    float tanHalfFov;
+    float power;
+    uint  maxIterations;   // DE fractal-formula iteration count
+    uint  maxRaySteps;
+    float epsilon;
+    float maxDistance;
+    uint  variant;         // 0 classic, 1 abs-transform (hollow/boxy look)
+    uint  aoEnabled;
+    uint  shadowsEnabled;
+    float lightAzimuth;
+    float lightElevation;
+    float ambientStrength;
+};
+
+/// Standard Mandelbulb distance estimator (power-N triplex formula, per
+/// Inigo Quilez / White & Nylander): r = |z|, theta = acos(z.z/r),
+/// phi = atan2(z.y, z.x), then z = r^power * (spherical basis of
+/// power*theta, power*phi) + pos. `trapOut` returns the orbit's closest
+/// approach to the origin, reused as a cheap coloring signal.
+inline float mandelbulbDE(float3 pos, float power, int maxIterations, int variant, thread float &trapOut) {
+    float3 z = pos;
+    float dr = 1.0;
+    float r = 0.0;
+    float trap = 1e10;
+    for (int i = 0; i < maxIterations; i++) {
+        r = length(z);
+        trap = min(trap, r);
+        if (r > 2.0) break;
+
+        float theta = acos(clamp(z.z / max(r, 1e-6), -1.0, 1.0));
+        float phi = atan2(z.y, z.x);
+        float zr = pow(r, power);
+        dr = pow(r, power - 1.0) * power * dr + 1.0;
+        theta *= power;
+        phi *= power;
+
+        float3 z2 = zr * float3(sin(theta) * cos(phi), sin(theta) * sin(phi), cos(theta));
+        if (variant == 1) { z2 = fabs(z2); } // hollow/boxy variant
+        z = z2 + pos;
+    }
+    trapOut = trap;
+    float safeR = max(r, 1e-6);
+    return 0.5 * log(safeR) * safeR / dr;
+}
+
+inline float mandelbulbDESimple(float3 pos, float power, int maxIterations, int variant) {
+    float unused;
+    return mandelbulbDE(pos, power, maxIterations, variant, unused);
+}
+
+inline float3 mandelbulbNormal(float3 p, float power, int maxIterations, int variant) {
+    float2 e = float2(1.0, -1.0) * 0.0005;
+    return normalize(
+        e.xyy * mandelbulbDESimple(p + e.xyy, power, maxIterations, variant) +
+        e.yyx * mandelbulbDESimple(p + e.yyx, power, maxIterations, variant) +
+        e.yxy * mandelbulbDESimple(p + e.yxy, power, maxIterations, variant) +
+        e.xxx * mandelbulbDESimple(p + e.xxx, power, maxIterations, variant)
+    );
+}
+
+/// Cheap ambient occlusion: samples the DE outward along the normal at a few
+/// increasing distances -- a big gap between "how far we moved" and "how
+/// much empty space the DE reports" means nearby geometry is crowding this
+/// point in, so darken it.
+inline float mandelbulbAO(float3 p, float3 n, float power, int maxIterations, int variant) {
+    float occlusion = 0.0;
+    float weight = 1.0;
+    for (int i = 1; i <= 5; i++) {
+        float dist = 0.02 * float(i);
+        float d = mandelbulbDESimple(p + n * dist, power, maxIterations, variant);
+        occlusion += (dist - d) * weight;
+        weight *= 0.6;
+    }
+    return saturate(1.0 - 1.5 * occlusion);
+}
+
+/// Classic IQ soft-shadow trick: march toward the light and track the
+/// tightest ratio of (distance to nearest surface) / (distance traveled) --
+/// a ray that stays comfortably clear of everything the whole way reports
+/// near 1 (fully lit); one that grazes past something nearby reports a
+/// small ratio (penumbra) well before it would actually be blocked outright.
+inline float mandelbulbSoftShadow(float3 ro, float3 rd, float power, int maxIterations, int variant, float maxDist) {
+    float res = 1.0;
+    float t = 0.02;
+    for (int i = 0; i < 32; i++) {
+        float d = mandelbulbDESimple(ro + rd * t, power, maxIterations, variant);
+        if (d < 0.0005) { return 0.0; }
+        res = min(res, 16.0 * d / t);
+        t += clamp(d, 0.005, 0.5);
+        if (t > maxDist) break;
+    }
+    return saturate(res);
+}
+
+/// Bilinear-resamples `sourceTexture` into `outTexture`, whatever their
+/// relative sizes -- used to composite the Mandelbulb's render-resolution
+/// output texture into the (generally differently-sized) drawable, the same
+/// sampling trick the 2D palette pass already relies on for its fast
+/// reduced-quality preview path.
+kernel void resampleColor(texture2d<float, access::sample> sourceTexture [[texture(0)]],
+                          texture2d<float, access::write> outTexture [[texture(1)]],
+                          uint2 gid [[thread_position_in_grid]])
+{
+    uint outWidth = outTexture.get_width();
+    uint outHeight = outTexture.get_height();
+    if (gid.x >= outWidth || gid.y >= outHeight) return;
+    constexpr sampler s(coord::normalized, address::clamp_to_edge, filter::linear);
+    float2 uv = (float2(gid) + 0.5) / float2(outWidth, outHeight);
+    outTexture.write(sourceTexture.sample(s, uv), gid);
+}
+
+kernel void mandelbulbRender(texture2d<float, access::write> outTexture [[texture(0)]],
+                              constant MandelbulbParams &params [[buffer(0)]],
+                              uint2 gid [[thread_position_in_grid]])
+{
+    if (gid.x >= params.width || gid.y >= params.height) return;
+
+    float3 eye = float3(params.eyeX, params.eyeY, params.eyeZ);
+    float3 right = float3(params.rightX, params.rightY, params.rightZ);
+    float3 up = float3(params.upX, params.upY, params.upZ);
+    float3 forward = float3(params.forwardX, params.forwardY, params.forwardZ);
+
+    float2 uv = (float2(gid) + 0.5) / float2(params.width, params.height);
+    float2 ndc = uv * 2.0 - 1.0;
+    ndc.y = -ndc.y;
+    float aspect = float(params.width) / float(params.height);
+
+    float3 rd = normalize(forward + ndc.x * params.tanHalfFov * aspect * right + ndc.y * params.tanHalfFov * up);
+    float3 ro = eye;
+
+    int maxIterations = int(params.maxIterations);
+    int variant = int(params.variant);
+
+    float t = 0.0;
+    bool hit = false;
+    float trap = 1e10;
+    for (int steps = 0; steps < int(params.maxRaySteps); steps++) {
+        float3 p = ro + rd * t;
+        float localTrap;
+        float d = mandelbulbDE(p, params.power, maxIterations, variant, localTrap);
+        if (d < params.epsilon * max(1.0, t)) {
+            hit = true;
+            trap = localTrap;
+            break;
+        }
+        t += d;
+        if (t > params.maxDistance) break;
+    }
+
+    float3 lightDir = normalize(float3(
+        cos(params.lightAzimuth) * cos(params.lightElevation),
+        sin(params.lightElevation),
+        sin(params.lightAzimuth) * cos(params.lightElevation)
+    ));
+
+    float3 color;
+    if (hit) {
+        float3 p = ro + rd * t;
+        float3 n = mandelbulbNormal(p, params.power, maxIterations, variant);
+        float ao = (params.aoEnabled != 0) ? mandelbulbAO(p, n, params.power, maxIterations, variant) : 1.0;
+        float shadow = (params.shadowsEnabled != 0)
+            ? mandelbulbSoftShadow(p + n * 0.01, lightDir, params.power, maxIterations, variant, params.maxDistance)
+            : 1.0;
+        float diffuse = max(dot(n, lightDir), 0.0);
+
+        // Base material color from the orbit trap (closest approach to the
+        // origin during the DE iteration) mixed across a small fixed
+        // gradient, so the surface reads with some richness rather than a
+        // single flat material tone.
+        float tNorm = saturate(trap / 2.0);
+        float3 colorA = float3(0.12, 0.05, 0.35);
+        float3 colorB = float3(0.90, 0.40, 0.10);
+        float3 base = mix(colorA, colorB, tNorm);
+
+        float ambient = params.ambientStrength;
+        float lighting = ambient * ao + diffuse * shadow * (1.0 - ambient);
+        color = base * lighting;
+
+        // Cheap depth fog so distant structure recedes instead of every
+        // surface reading at the same brightness regardless of distance.
+        float fog = 1.0 - saturate(t / params.maxDistance);
+        float3 skyColor = float3(0.015, 0.015, 0.035);
+        color = mix(skyColor, color, fog);
+    } else {
+        float skyT = saturate(rd.y * 0.5 + 0.5);
+        color = mix(float3(0.015, 0.015, 0.035), float3(0.05, 0.07, 0.12), skyT);
+    }
+
+    outTexture.write(float4(color, 1.0), gid);
+}

@@ -18,11 +18,14 @@ struct MandelbrotExplorerApp: App {
         if let dir = ProcessInfo.processInfo.environment["COLOR_MODE_TEST_DIR"] {
             PresetPreviewTool.runColorModeTest(outputDir: dir)
         }
+        if let dir = ProcessInfo.processInfo.environment["MANDELBULB_TEST_DIR"] {
+            PresetPreviewTool.runMandelbulbTest(outputDir: dir)
+        }
     }
 
     var body: some Scene {
         WindowGroup("Mandelbrot Explorer") {
-            ContentView()
+            RootView()
                 .frame(minWidth: 1000, minHeight: 700)
         }
         .windowResizability(.contentMinSize)

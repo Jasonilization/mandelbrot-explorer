@@ -141,6 +141,47 @@ enum PresetPreviewTool {
         FileHandle.standardError.write((s + "\n").data(using: .utf8)!)
     }
 
+    /// Headless smoke test for the Mandelbulb explorer: renders a handful of
+    /// camera angles/variants/power values straight to PNG, no window
+    /// needed. Activated by MANDELBULB_TEST_DIR.
+    static func runMandelbulbTest(outputDir: String) {
+        try? FileManager.default.createDirectory(atPath: outputDir, withIntermediateDirectories: true)
+        let renderer = MandelbulbRenderer()
+        let deadline = Date().addingTimeInterval(15)
+        while !renderer.isReady && Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+        }
+        let size = CGSize(width: 480, height: 300)
+
+        func capture(_ name: String, configure: () -> Void) {
+            configure()
+            var done = false
+            renderer.captureImage(size: size) { image in
+                defer { done = true }
+                guard let image else { logErr("FAILED \(name)"); return }
+                let rep = NSBitmapImageRep(cgImage: image)
+                if let data = rep.representation(using: .png, properties: [:]) {
+                    try? data.write(to: URL(fileURLWithPath: "\(outputDir)/\(name).png"))
+                    logErr("wrote \(name)")
+                }
+            }
+            let d2 = Date().addingTimeInterval(60)
+            while !done && Date() < d2 { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+            if !done { logErr("TIMEOUT \(name)") }
+        }
+
+        capture("classic_default") {}
+        capture("power4") { renderer.power = 4 }
+        capture("hollow") { renderer.power = 8; renderer.hollowVariant = true }
+        capture("power12_spiky") { renderer.hollowVariant = false; renderer.power = 12 }
+        capture("low_quality") { renderer.power = 8; renderer.quality = .low }
+        capture("ultra_quality") { renderer.quality = .ultra }
+        capture("high_quality_ao_shadows") { renderer.quality = .high }
+
+        logErr("DONE")
+        exit(0)
+    }
+
     /// Headless correctness check for the color engine: renders the same
     /// view under every `ColorMode`/orbit trap shape/shading combination, at
     /// both a GPU-tier zoom and a perturbation-tier (CPU) zoom, so a broken
