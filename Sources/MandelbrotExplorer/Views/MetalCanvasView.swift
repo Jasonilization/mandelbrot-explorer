@@ -24,6 +24,12 @@ struct MetalCanvasView: NSViewRepresentable {
         view.enableSetNeedsDisplay = false
         view.preferredFramesPerSecond = 120
         view.autoResizeDrawable = true
+        // A dark neutral rather than pure black: while the shader library is
+        // still compiling (nothing presented yet), this reads as "a dark
+        // panel that's about to show something" rather than a dead/crashed
+        // window. The SwiftUI loading overlay in ContentView sits on top of
+        // it either way.
+        view.clearColor = MTLClearColorMake(0.05, 0.055, 0.07, 1.0)
         (view.layer as? CAMetalLayer)?.framebufferOnly = false
         renderer.metalView = view
         return view

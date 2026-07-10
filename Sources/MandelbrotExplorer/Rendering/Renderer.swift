@@ -30,11 +30,46 @@ final class FractalRenderer: NSObject, ObservableObject, MTKViewDelegate {
     @Published var renderWidth: Int = 0
     @Published var renderHeight: Int = 0
 
+    /// How many leading iterations series approximation let the last
+    /// perturbation render skip, and how long that render's reference orbit
+    /// was. Both 0 outside the perturbation tier. Purely informational --
+    /// drives the "Rendering" status indicator described in the additional
+    /// quality features (precision/mode visibility).
+    @Published var seriesApproximationSkip: Int = 0
+    @Published var referenceOrbitIterations: Int = 0
+
+    /// False until the Metal shader library has finished compiling. Shader
+    /// compilation is a few hundred ms of blocking work; doing it on the
+    /// main thread at launch used to freeze the window (a plain black
+    /// screen, since that's MTKView's default clear color) before the first
+    /// frame could render. It now happens off the main actor, and
+    /// ContentView shows a loading overlay until this flips to true.
+    @Published var isReady: Bool = false
+
+    /// True while auto-zoom or a manual gesture is actively moving the
+    /// viewport -- both should get the same reduced-quality/iteration
+    /// treatment so continuous motion never spikes CPU/GPU usage.
+    var isAnimating: Bool { isInteracting || isAutoZooming }
+
+    /// Continuously and smoothly zooms toward the center of the view when
+    /// enabled. Cancelled by any manual pan/zoom/pinch.
+    @Published var isAutoZooming: Bool = false {
+        didSet {
+            guard isAutoZooming, !oldValue else { return }
+            autoZoomLastTimestamp = CACurrentMediaTime()
+            wake()
+        }
+    }
+    /// Zoom multiplier applied per second of auto-zoom, e.g. 1.15 = 15%/sec.
+    @Published var autoZoomSpeed: Double = 1.15
+
+    private var autoZoomLastTimestamp: CFTimeInterval = CACurrentMediaTime()
+
     let device: MTLDevice
     private let queue: MTLCommandQueue
-    private var pipelineFloat32: MTLComputePipelineState!
-    private var pipelineDD: MTLComputePipelineState!
-    private var pipelinePalette: MTLComputePipelineState!
+    private var pipelineFloat32: MTLComputePipelineState?
+    private var pipelineDD: MTLComputePipelineState?
+    private var pipelinePalette: MTLComputePipelineState?
 
     private var iterationTexture: MTLTexture?
     private var stopsBuffer: MTLBuffer?
@@ -66,36 +101,47 @@ final class FractalRenderer: NSObject, ObservableObject, MTKViewDelegate {
         self.device = device
         self.queue = queue
         super.init()
-        buildPipelines()
         rebuildStopsBuffer()
+        buildPipelinesAsync()
     }
 
-    private func buildPipelines() {
-        let source = FractalRenderer.loadShaderSource()
-        do {
-            // Fast-math defaults to on and permits reassociating/contracting
-            // float ops. The double-double kernel's two-sum/two-prod error
-            // terms only work if every add/multiply rounds exactly as
-            // written -- fast-math is free to "simplify" e.g. `fma(a,b,-p)`
-            // where `p = a*b` down to a literal zero, silently collapsing
-            // double-double back to plain float32 precision. Must stay off.
-            let options = MTLCompileOptions()
-            options.fastMathEnabled = false
-            let library = try device.makeLibrary(source: source, options: options)
-            guard let f32 = library.makeFunction(name: "mandelbrotFloat32"),
-                  let dd = library.makeFunction(name: "mandelbrotDoubleDouble"),
-                  let pal = library.makeFunction(name: "paletteMap") else {
-                fatalError("Missing kernel functions in compiled shader library.")
+    private func buildPipelinesAsync() {
+        let device = self.device
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let source = FractalRenderer.loadShaderSource()
+            do {
+                // Fast-math defaults to on and permits reassociating/contracting
+                // float ops. The double-double kernel's two-sum/two-prod error
+                // terms only work if every add/multiply rounds exactly as
+                // written -- fast-math is free to "simplify" e.g. `fma(a,b,-p)`
+                // where `p = a*b` down to a literal zero, silently collapsing
+                // double-double back to plain float32 precision. Must stay off.
+                let options = MTLCompileOptions()
+                options.fastMathEnabled = false
+                let library = try await device.makeLibrary(source: source, options: options)
+                guard let f32 = library.makeFunction(name: "mandelbrotFloat32"),
+                      let dd = library.makeFunction(name: "mandelbrotDoubleDouble"),
+                      let pal = library.makeFunction(name: "paletteMap") else {
+                    fatalError("Missing kernel functions in compiled shader library.")
+                }
+                let pipeF32 = try await device.makeComputePipelineState(function: f32)
+                let pipeDD = try await device.makeComputePipelineState(function: dd)
+                let pipePal = try await device.makeComputePipelineState(function: pal)
+                await MainActor.run {
+                    guard let self else { return }
+                    self.pipelineFloat32 = pipeF32
+                    self.pipelineDD = pipeDD
+                    self.pipelinePalette = pipePal
+                    self.isReady = true
+                    self.wake()
+                }
+            } catch {
+                fatalError("Failed to build Metal shader pipelines: \(error)")
             }
-            pipelineFloat32 = try device.makeComputePipelineState(function: f32)
-            pipelineDD = try device.makeComputePipelineState(function: dd)
-            pipelinePalette = try device.makeComputePipelineState(function: pal)
-        } catch {
-            fatalError("Failed to build Metal shader pipelines: \(error)")
         }
     }
 
-    private static func loadShaderSource() -> String {
+    private nonisolated static func loadShaderSource() -> String {
         let candidates: [URL?] = [
             Bundle.module.url(forResource: "Shaders", withExtension: "metal"),
             Bundle.module.url(forResource: "Shaders", withExtension: "metal", subdirectory: "Rendering"),
@@ -122,6 +168,7 @@ final class FractalRenderer: NSObject, ObservableObject, MTKViewDelegate {
 
     func markInteractionBegan() {
         isInteracting = true
+        isAutoZooming = false // manual input always takes back control
         interactionResetWorkItem?.cancel()
         wake()
     }
@@ -136,15 +183,19 @@ final class FractalRenderer: NSObject, ObservableObject, MTKViewDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: item)
     }
 
-    /// Snap the view back to a responsive frame rate. Cheap and idempotent;
-    /// safe to call from any published-property `didSet`. Deliberately never
-    /// pauses the view outright -- a fully paused `MTKView` only resumes on
-    /// an explicit wake, and any missed/racy wake (async task completing
-    /// after an idle-timeout, a SwiftUI update outside the tracked paths...)
-    /// would freeze the app forever. Throttling `preferredFramesPerSecond`
-    /// instead keeps `draw(in:)` firing at a slow heartbeat even at rest, so
-    /// the view always self-heals within a fraction of a second.
+    /// Snap the view back to a responsive frame rate and mark that the next
+    /// frame has actual work to do. Cheap and idempotent; safe to call from
+    /// any published-property `didSet`. Deliberately never pauses the view
+    /// outright -- a fully paused `MTKView` only resumes on an explicit
+    /// wake, and any missed/racy wake (async task completing after an
+    /// idle-timeout, a SwiftUI update outside the tracked paths...) would
+    /// freeze the app forever. Throttling `preferredFramesPerSecond` instead
+    /// keeps `draw(in:)` firing at a slow heartbeat even at rest, so the
+    /// view always self-heals within a fraction of a second -- but see
+    /// `needsRedraw` for why that heartbeat no longer costs GPU time once
+    /// the scene is actually static.
     private func wake() {
+        needsRedraw = true
         idleFrameCount = 0
         if metalView?.preferredFramesPerSecond != FractalRenderer.activeFPS {
             metalView?.preferredFramesPerSecond = FractalRenderer.activeFPS
@@ -154,12 +205,42 @@ final class FractalRenderer: NSObject, ObservableObject, MTKViewDelegate {
     private static let activeFPS = 120
     private static let idleFPS = 8
 
+    /// Set by `wake()` whenever an input actually changes something (pan,
+    /// zoom, palette, resize, a perturbation result landing...) and cleared
+    /// right after a frame is actually rendered. Without this, the idle
+    /// heartbeat re-ran the full compute + palette shader pass every single
+    /// frame forever just to redraw pixels that hadn't changed -- cheap per
+    /// frame, but it never stopped, so GPU/CPU usage crept up the longer the
+    /// window sat open. Gating on it means idle frames are a no-op: Core
+    /// Animation keeps showing the last presented drawable untouched.
+    private var needsRedraw: Bool = true
+
     // MARK: - MTKViewDelegate
 
-    func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
+    func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
+        wake() // new drawable size always needs a fresh render
+    }
 
     func draw(in view: MTKView) {
+        guard isReady else { return } // still compiling shaders; overlay covers the canvas
         let now = CACurrentMediaTime()
+
+        if isAutoZooming {
+            stepAutoZoom(now: now, viewSize: view.drawableSize)
+        }
+
+        let active = isAnimating || perturbationBusy
+        guard needsRedraw || active else {
+            // Nothing changed and nothing in flight: skip all GPU work. The
+            // previously presented drawable stays on screen untouched, and
+            // we keep decaying toward the idle frame rate below.
+            idleFrameCount += 1
+            if idleFrameCount > 3, view.preferredFramesPerSecond != FractalRenderer.idleFPS {
+                view.preferredFramesPerSecond = FractalRenderer.idleFPS
+            }
+            return
+        }
+
         let dt = now - lastFrameTimestamp
         lastFrameTimestamp = now
         // A large gap means we just resumed from being idle/paused -- don't
@@ -181,11 +262,12 @@ final class FractalRenderer: NSObject, ObservableObject, MTKViewDelegate {
             renderPerturbationTier(view: view, drawableSize: drawableSize)
         }
 
+        needsRedraw = false
+
         // Adaptive frame rate rather than a hard pause: run fast while
         // something is actually in motion, and drop to a slow heartbeat once
         // settled. The heartbeat (never zero) guarantees the view can never
         // get permanently stuck showing a stale/low-quality frame.
-        let active = isInteracting || perturbationBusy
         if active {
             idleFrameCount = 0
             if view.preferredFramesPerSecond != FractalRenderer.activeFPS {
@@ -199,6 +281,27 @@ final class FractalRenderer: NSObject, ObservableObject, MTKViewDelegate {
         }
     }
 
+    /// Applies one frame's worth of smooth, frame-rate-independent zoom
+    /// toward the center of the view. Runs from `draw(in:)` rather than a
+    /// separate timer so it naturally shares the same GPU-driven cadence
+    /// (and reduced quality/iterations via `isAnimating`) as manual
+    /// interaction, instead of fighting it for control of the frame rate.
+    private func stepAutoZoom(now: CFTimeInterval, viewSize: CGSize) {
+        defer { autoZoomLastTimestamp = now }
+        guard viewSize.width > 1, viewSize.height > 1 else { return }
+        let dt = min(0.1, max(0, now - autoZoomLastTimestamp))
+        guard dt > 0 else { return }
+        guard viewport.spanX > Viewport.minSpanX * 1.0001 else {
+            // Hit the precision floor -- further zoom wouldn't change
+            // anything, so stop rather than spin forever.
+            isAutoZooming = false
+            return
+        }
+        let factor = pow(autoZoomSpeed, dt)
+        let center = CGPoint(x: viewSize.width / 2, y: viewSize.height / 2)
+        viewport.zoom(by: factor, aroundScreenPoint: center, viewSize: viewSize)
+    }
+
     private func updateFPS(frameSeconds: Double) {
         guard frameSeconds > 0 else { return }
         recentFrameTimesMs.append(frameSeconds * 1000)
@@ -209,7 +312,7 @@ final class FractalRenderer: NSObject, ObservableObject, MTKViewDelegate {
 
     private func adjustQualityScale(lastFrameMs: Double) {
         let targetMs = 16.0
-        if isInteracting {
+        if isAnimating {
             if lastFrameMs > targetMs * 1.3 {
                 qualityScale = max(0.28, qualityScale - 0.08)
             } else if lastFrameMs < targetMs * 0.6 {
@@ -224,13 +327,17 @@ final class FractalRenderer: NSObject, ObservableObject, MTKViewDelegate {
 
     private func renderGPUTier(tier: RenderTier, view: MTKView, drawableSize: CGSize) {
         guard let drawable = view.currentDrawable else { return }
-        let scale = isInteracting ? qualityScale : 1.0
+        guard let pipeline = tier == .float32 ? pipelineFloat32 : pipelineDD else { return }
+        // Stale from a previous perturbation render; irrelevant on the GPU tiers.
+        if seriesApproximationSkip != 0 { seriesApproximationSkip = 0 }
+        if referenceOrbitIterations != 0 { referenceOrbitIterations = 0 }
+        let scale = isAnimating ? qualityScale : 1.0
         let renderW = max(8, Int(drawableSize.width * scale))
         let renderH = max(8, Int(drawableSize.height * scale))
         renderWidth = renderW
         renderHeight = renderH
 
-        let iterations = isInteracting ? min(maxIterations, 220) : maxIterations
+        let iterations = isAnimating ? min(maxIterations, 220) : maxIterations
 
         guard let iterTex = makeOrReuseIterationTexture(width: renderW, height: renderH) else { return }
         guard stopsBuffer != nil else { return }
@@ -253,10 +360,10 @@ final class FractalRenderer: NSObject, ObservableObject, MTKViewDelegate {
         let start = CACurrentMediaTime()
 
         if let encoder = commandBuffer.makeComputeCommandEncoder() {
-            encoder.setComputePipelineState(tier == .float32 ? pipelineFloat32 : pipelineDD)
+            encoder.setComputePipelineState(pipeline)
             encoder.setTexture(iterTex, index: 0)
             encoder.setBytes(&params, length: MemoryLayout<FractalParams>.stride, index: 0)
-            dispatch(encoder: encoder, pipeline: tier == .float32 ? pipelineFloat32 : pipelineDD, width: renderW, height: renderH)
+            dispatch(encoder: encoder, pipeline: pipeline, width: renderW, height: renderH)
             encoder.endEncoding()
         }
 
@@ -278,16 +385,16 @@ final class FractalRenderer: NSObject, ObservableObject, MTKViewDelegate {
 
         let targetLongEdge: Double = 1500
         let baseScale = min(1.0, targetLongEdge / max(drawableSize.width, drawableSize.height))
-        let scale = (isInteracting ? min(baseScale, 0.4) : baseScale)
+        let scale = (isAnimating ? min(baseScale, 0.4) : baseScale)
         let renderW = max(8, Int(drawableSize.width * scale))
         let renderH = max(8, Int(drawableSize.height * scale))
 
-        let iterations = isInteracting ? min(maxIterations, 300) : maxIterations
+        let iterations = isAnimating ? min(maxIterations, 300) : maxIterations
         let signature = "\(viewport.center.re.terms)|\(viewport.center.im.terms)|\(viewport.spanX)|\(iterations)|\(renderW)x\(renderH)"
 
         if signature != lastPerturbationSignature && !perturbationBusy {
             lastPerturbationSignature = signature
-            perturbationSettledAtFullQuality = !isInteracting
+            perturbationSettledAtFullQuality = !isAnimating
             kickOffPerturbation(width: renderW, height: renderH, iterations: iterations)
         }
 
@@ -316,29 +423,43 @@ final class FractalRenderer: NSObject, ObservableObject, MTKViewDelegate {
         perturbationGeneration += 1
         let generation = perturbationGeneration
 
+        // Ensure the destination texture exists (freshly blanked to a
+        // neutral value if it just changed size) before any tile lands, so
+        // progressive fill-in always has a correctly-sized, non-garbage
+        // buffer to paint into from the very first tile onward.
+        _ = makeOrReuseIterationTexture(width: width, height: height)
+
         let centerDeep = viewport.center
         let pixelSize = viewport.spanX / Double(width)
         let precision = viewport.precisionTerms
 
         Task.detached(priority: .userInitiated) { [weak self] in
-            let values = Perturbation.render(
+            let result = Perturbation.render(
                 centerDeep: centerDeep,
                 pixelSize: pixelSize,
                 width: width,
                 height: height,
                 maxIterations: iterations,
                 escapeRadius: 16.0,
-                precision: precision
+                precision: precision,
+                onTileComplete: { tile in
+                    Task { @MainActor [weak self] in
+                        guard let self, generation == self.perturbationGeneration else { return }
+                        self.applyPerturbationTile(tile, fullWidth: width, fullHeight: height)
+                    }
+                }
             )
             await MainActor.run {
                 guard let self, generation == self.perturbationGeneration else { return }
-                self.applyPerturbationResult(values, width: width, height: height)
+                self.applyPerturbationResult(result.values, width: width, height: height)
+                self.seriesApproximationSkip = result.seriesApproximationSkip
+                self.referenceOrbitIterations = result.referenceOrbitIterations
                 self.perturbationBusy = false
                 self.isRefining = false
 
                 // If we rendered a reduced preview while idle (e.g. right
                 // after a pan settled), immediately queue the full-quality pass.
-                if !self.perturbationSettledAtFullQuality && !self.isInteracting {
+                if !self.perturbationSettledAtFullQuality && !self.isAnimating {
                     self.perturbationSettledAtFullQuality = true
                     self.lastPerturbationSignature = ""
                 }
@@ -350,6 +471,25 @@ final class FractalRenderer: NSObject, ObservableObject, MTKViewDelegate {
                 self.wake()
             }
         }
+    }
+
+    /// Blits one progressively-completed tile straight into the iteration
+    /// texture and wakes the view, so a slow deep-zoom render visibly fills
+    /// in tile by tile instead of leaving the old frame on screen until the
+    /// entire buffer is ready. Guarded against a texture that was
+    /// reallocated (e.g. a resize raced with an in-flight render) between
+    /// `kickOffPerturbation` creating it and this tile landing.
+    private func applyPerturbationTile(_ tile: Perturbation.TileUpdate, fullWidth: Int, fullHeight: Int) {
+        guard let tex = iterationTexture, tex.width == fullWidth, tex.height == fullHeight else { return }
+        tile.values.withUnsafeBytes { raw in
+            tex.replace(
+                region: MTLRegionMake2D(tile.originX, tile.originY, tile.width, tile.height),
+                mipmapLevel: 0,
+                withBytes: raw.baseAddress!,
+                bytesPerRow: tile.width * MemoryLayout<Float>.stride
+            )
+        }
+        wake()
     }
 
     private func applyPerturbationResult(_ values: [Float], width: Int, height: Int) {
@@ -375,7 +515,7 @@ final class FractalRenderer: NSObject, ObservableObject, MTKViewDelegate {
     }
 
     private func encodePalette(commandBuffer: MTLCommandBuffer, source: MTLTexture, destination: MTLTexture, sourceSize: (Int, Int)) {
-        guard let stopsBuffer else { return }
+        guard let stopsBuffer, let pipelinePalette else { return }
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
         encoder.setComputePipelineState(pipelinePalette)
         encoder.setTexture(source, index: 0)
@@ -403,6 +543,16 @@ final class FractalRenderer: NSObject, ObservableObject, MTKViewDelegate {
         desc.usage = [.shaderRead, .shaderWrite]
         desc.storageMode = .shared
         let tex = device.makeTexture(descriptor: desc)
+        if let tex {
+            // A freshly-allocated texture's contents are undefined. Blank it
+            // to "interior" (-1) so a resize or new deep render reads as a
+            // calm, neutral color while progressive tiles are still landing,
+            // instead of a frame of uninitialized-memory noise.
+            let blank = [Float](repeating: -1, count: width * height)
+            blank.withUnsafeBytes { raw in
+                tex.replace(region: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0, withBytes: raw.baseAddress!, bytesPerRow: width * MemoryLayout<Float>.stride)
+            }
+        }
         iterationTexture = tex
         return tex
     }
@@ -428,8 +578,8 @@ final class FractalRenderer: NSObject, ObservableObject, MTKViewDelegate {
                 width: UInt32(width), height: UInt32(height),
                 maxIterations: UInt32(maxIterations), escapeRadiusSq: 256.0
             )
+            guard let pipeline = tier == .float32 ? pipelineFloat32 : pipelineDD else { completion(nil); return }
             guard let cb = queue.makeCommandBuffer(), let encoder = cb.makeComputeCommandEncoder() else { completion(nil); return }
-            let pipeline = tier == .float32 ? pipelineFloat32! : pipelineDD!
             encoder.setComputePipelineState(pipeline)
             encoder.setTexture(tex, index: 0)
             encoder.setBytes(&params, length: MemoryLayout<FractalParams>.stride, index: 0)
@@ -448,12 +598,12 @@ final class FractalRenderer: NSObject, ObservableObject, MTKViewDelegate {
             let precision = viewport.precisionTerms
             let iterations = maxIterations
             Task.detached(priority: .userInitiated) {
-                let values = Perturbation.render(
+                let result = Perturbation.render(
                     centerDeep: centerDeep, pixelSize: pixelSize,
                     width: width, height: height,
                     maxIterations: iterations, escapeRadius: 16.0, precision: precision
                 )
-                await MainActor.run { completion(values) }
+                await MainActor.run { completion(result.values) }
             }
         }
     }

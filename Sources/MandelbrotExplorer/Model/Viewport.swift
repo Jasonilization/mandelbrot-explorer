@@ -9,6 +9,10 @@ struct Viewport {
     var spanX: Double
 
     static let initialSpanX = 4.0
+    /// Floor for `spanX`: past this, we're beyond both the precision budget
+    /// and Double's exponent range. Shared with auto-zoom so it knows when
+    /// to stop rather than looping forever with no visible effect.
+    static let minSpanX = 1e-290
 
     static func initial() -> Viewport {
         Viewport(center: ComplexExpansion(re: Expansion(-0.5), im: Expansion(0.0)), spanX: initialSpanX)
@@ -58,7 +62,7 @@ struct Viewport {
         // Clamp to avoid pathological zoom-out past the classic view or
         // zoom-in past what our precision budget / Double exponent range support.
         spanX = min(spanX, 6.0)
-        spanX = max(spanX, 1e-290)
+        spanX = max(spanX, Viewport.minSpanX)
     }
 
     mutating func reset() {

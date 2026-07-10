@@ -53,6 +53,15 @@ struct SidebarView: View {
                 }
             }
 
+            Section("Auto Zoom") {
+                Toggle("Smooth Auto Zoom", isOn: $renderer.isAutoZooming)
+
+                VStack(alignment: .leading) {
+                    Text("Speed")
+                    Slider(value: $renderer.autoZoomSpeed, in: 1.03...1.6)
+                }
+            }
+
             Section("Color") {
                 Picker("Palette", selection: $renderer.palette) {
                     ForEach(ColorPalette.all) { p in

@@ -7,9 +7,21 @@ import Foundation
 /// setting PRESET_PREVIEW_DIR so it never runs in the shipped app.
 @MainActor
 enum PresetPreviewTool {
+    /// Shader compilation now happens off the main actor (see
+    /// `FractalRenderer.buildPipelinesAsync`), so a headless run that starts
+    /// capturing immediately would spuriously fail every GPU-tier preset
+    /// until compilation happens to catch up in the background.
+    private static func waitUntilReady(_ renderer: FractalRenderer, timeout: TimeInterval = 15) {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !renderer.isReady && Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+        }
+    }
+
     static func run(outputDir: String) {
         try? FileManager.default.createDirectory(atPath: outputDir, withIntermediateDirectories: true)
         let renderer = FractalRenderer()
+        waitUntilReady(renderer)
         let size = CGSize(width: 900, height: 560)
 
         func stats(_ values: [Float]) -> String {
@@ -131,6 +143,7 @@ enum PresetPreviewTool {
     /// Renders a square, high-color-contrast crop for use as the app icon.
     static func renderIcon(to path: String) {
         let renderer = FractalRenderer()
+        waitUntilReady(renderer)
         renderer.palette = ColorPalette.all.first(where: { $0.id == "fire" }) ?? .default
         let re = Expansion(decimalString: "-0.1592", precision: 4)
         let im = Expansion(decimalString: "1.0317", precision: 4)
@@ -195,15 +208,16 @@ enum PresetPreviewTool {
             if a.x * a.x + a.y * a.y > 256 { directEscapeN = n; break }
         }
         logErr("DIRECT pixel(0,0) escapeN=\(String(describing: directEscapeN)) (perturbation reported n=3050 for this pixel per earlier px log)")
-        let values = Perturbation.render(
+        let result = Perturbation.render(
             centerDeep: center, pixelSize: pixelSize,
             width: 900, height: 560,
             maxIterations: iters, escapeRadius: 16.0, precision: precision
         )
+        let values = result.values
         var escaped = 0
         var uniqueValues = Set<Float>()
         for v in values { if v >= 0 { escaped += 1 }; uniqueValues.insert(v) }
-        logErr("escaped=\(escaped)/\(values.count) uniqueValueCount=\(uniqueValues.count) sampleUniqueValues=\(uniqueValues.prefix(10))")
+        logErr("escaped=\(escaped)/\(values.count) uniqueValueCount=\(uniqueValues.count) sampleUniqueValues=\(uniqueValues.prefix(10)) seriesApproximationSkip=\(result.seriesApproximationSkip) referenceOrbitIterations=\(result.referenceOrbitIterations)")
         exit(0)
     }
 }
