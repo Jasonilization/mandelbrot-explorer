@@ -21,6 +21,12 @@ struct MandelbrotExplorerApp: App {
         if let dir = ProcessInfo.processInfo.environment["MANDELBULB_TEST_DIR"] {
             PresetPreviewTool.runMandelbulbTest(outputDir: dir)
         }
+        if let dir = ProcessInfo.processInfo.environment["JULIA_TEST_DIR"] {
+            PresetPreviewTool.runJuliaTest(outputDir: dir)
+        }
+        if let spec = ProcessInfo.processInfo.environment["JULIA_DEBUG_SINGLE"] {
+            PresetPreviewTool.runJuliaSingle(spec: spec)
+        }
     }
 
     var body: some Scene {

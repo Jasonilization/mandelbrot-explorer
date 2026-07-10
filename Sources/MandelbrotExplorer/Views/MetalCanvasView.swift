@@ -7,9 +7,14 @@ import SwiftUI
 /// click + drag = pan, trackpad pinch = zoom as a bonus.
 struct MetalCanvasView: NSViewRepresentable {
     @ObservedObject var renderer: FractalRenderer
+    /// Double-click handoff: called with the clicked point's fractal
+    /// coordinate instead of starting a drag. `nil` disables the gesture
+    /// entirely (e.g. on the Julia tab's own canvas, which has nothing to
+    /// hand off to).
+    var onDoubleClick: ((SIMD2<Double>) -> Void)? = nil
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(renderer: renderer)
+        Coordinator(renderer: renderer, onDoubleClick: onDoubleClick)
     }
 
     func makeNSView(context: Context) -> InteractiveMTKView {
@@ -40,14 +45,25 @@ struct MetalCanvasView: NSViewRepresentable {
     @MainActor
     final class Coordinator {
         let renderer: FractalRenderer
+        let onDoubleClick: ((SIMD2<Double>) -> Void)?
         private var lastDragPoint: CGPoint?
 
-        init(renderer: FractalRenderer) {
+        init(renderer: FractalRenderer, onDoubleClick: ((SIMD2<Double>) -> Void)? = nil) {
             self.renderer = renderer
+            self.onDoubleClick = onDoubleClick
         }
 
-        func mouseDown(at point: CGPoint) {
+        func mouseDown(at point: CGPoint, clickCount: Int, viewSize: CGSize) {
             guard !renderer.isInputLocked else { return }
+            if clickCount >= 2, let onDoubleClick {
+                // AppKit's point space is bottom-left-origin; flip to the
+                // top-left-origin convention `Viewport` expects (same flip
+                // `scroll`/`magnify` already apply below).
+                let rawPoint = CGPoint(x: point.x, y: viewSize.height - point.y)
+                let coordinate = renderer.viewport.fractalCoordinate(atScreenPoint: rawPoint, viewSize: viewSize)
+                onDoubleClick(coordinate)
+                return
+            }
             lastDragPoint = point
             renderer.markInteractionBegan()
         }
@@ -96,7 +112,7 @@ final class InteractiveMTKView: MTKView {
     override var acceptsFirstResponder: Bool { true }
 
     override func mouseDown(with event: NSEvent) {
-        coordinator?.mouseDown(at: convert(event.locationInWindow, from: nil))
+        coordinator?.mouseDown(at: convert(event.locationInWindow, from: nil), clickCount: event.clickCount, viewSize: bounds.size)
     }
 
     override func mouseDragged(with event: NSEvent) {

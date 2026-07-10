@@ -6,8 +6,28 @@ import simd
 
 @MainActor
 final class FractalRenderer: NSObject, ObservableObject, MTKViewDelegate {
+    /// Which fractal family this instance draws -- fixed for its lifetime.
+    /// The Mandelbrot and Julia tabs each own their own instance of this
+    /// exact same engine (see `RootView`), configured by this one flag.
+    let kind: FractalKind
     @Published var viewport: Viewport = .initial() { didSet { autoAdjustIterationsIfNeeded(); wake() } }
     @Published var maxIterations: Int = 500 { didSet { wake() } }
+    /// Julia mode's fixed c parameter, shared by every pixel in the image
+    /// (as opposed to Mandelbrot's `viewport`, where c is what varies per
+    /// pixel). Unused when `kind == .mandelbrot`.
+    @Published var juliaC: SIMD2<Double> = SIMD2(-0.4, 0.6) { didSet { wake() } }
+
+    /// A random c value biased toward the annulus around the Mandelbrot
+    /// set's main cardioid/bulbs (radius ~0.3-1.1 from the origin), where
+    /// most of the visually rich connected-but-intricate and thin-dendrite
+    /// Julia sets live -- picking uniformly over the full [-2,2]² square
+    /// would mostly land deep outside the Mandelbrot set, where Julia sets
+    /// degenerate into uninteresting dust.
+    func randomJuliaC() -> SIMD2<Double> {
+        let angle = Double.random(in: 0..<(2 * .pi))
+        let radius = Double.random(in: 0.3...1.1)
+        return SIMD2(radius * cos(angle), radius * sin(angle))
+    }
     /// True while `FractalRecorder` has taken over the viewport to drive an
     /// offline zoom journey. Blocks manual pan/zoom/pinch and the live
     /// auto-zoom toggle so the two never fight over the same camera state.
@@ -146,7 +166,8 @@ final class FractalRenderer: NSObject, ObservableObject, MTKViewDelegate {
     private var perturbationSettledAtFullQuality = false
     private var lastPerturbationSignature = ""
 
-    override init() {
+    init(kind: FractalKind = .mandelbrot) {
+        self.kind = kind
         guard let device = MTLCreateSystemDefaultDevice(),
               let queue = device.makeCommandQueue() else {
             fatalError("Metal is not available on this device.")
@@ -154,6 +175,7 @@ final class FractalRenderer: NSObject, ObservableObject, MTKViewDelegate {
         self.device = device
         self.queue = queue
         super.init()
+        if kind == .julia { viewport = Viewport.julia() }
         rebuildStopsBuffer()
         buildPipelinesAsync()
     }
@@ -540,7 +562,9 @@ final class FractalRenderer: NSObject, ObservableObject, MTKViewDelegate {
             smoothingEnabled: smoothingEnabled ? 1 : 0,
             trapType: trap.type,
             trapParamX: trap.x,
-            trapParamY: trap.y
+            trapParamY: trap.y,
+            mode: kind.rawValue,
+            juliaC: SIMD2(Float(juliaC.x), Float(juliaC.y))
         )
 
         guard let commandBuffer = queue.makeCommandBuffer() else { return }
@@ -577,7 +601,7 @@ final class FractalRenderer: NSObject, ObservableObject, MTKViewDelegate {
         let renderH = max(8, Int(drawableSize.height * scale))
 
         let iterations = isAnimating ? min(maxIterations, 300) : maxIterations
-        let signature = "\(viewport.center.re.terms)|\(viewport.center.im.terms)|\(viewport.spanX)|\(iterations)|\(renderW)x\(renderH)|\(colorMode.rawValue)|\(smoothingEnabled)|\(orbitTrap)"
+        let signature = "\(kind.rawValue)|\(juliaC.x)|\(juliaC.y)|\(viewport.center.re.terms)|\(viewport.center.im.terms)|\(viewport.spanX)|\(iterations)|\(renderW)x\(renderH)|\(colorMode.rawValue)|\(smoothingEnabled)|\(orbitTrap)"
 
         if signature != lastPerturbationSignature && !perturbationBusy {
             lastPerturbationSignature = signature
@@ -610,15 +634,20 @@ final class FractalRenderer: NSObject, ObservableObject, MTKViewDelegate {
         perturbationGeneration += 1
         let generation = perturbationGeneration
 
-        // Ensure the destination texture exists (freshly blanked to a
-        // neutral value if it just changed size) before any tile lands, so
-        // progressive fill-in always has a correctly-sized, non-garbage
-        // buffer to paint into from the very first tile onward.
-        _ = makeOrReuseIterationTexture(width: width, height: height)
+        // Ensure the destination texture exists before any tile lands, so
+        // progressive fill-in always has a correctly-sized buffer to paint
+        // into from the very first tile onward. Seeded from a bilinear
+        // resample of whatever was on screen before (rather than a flat
+        // blank) so a resolution change mid-interaction reads as an instant,
+        // if blurry, continuation of the same scene instead of a black flash
+        // while the real computation is still in flight.
+        _ = makeOrReuseIterationTexture(width: width, height: height, seedFromPrevious: true)
 
         let centerDeep = viewport.center
         let pixelSize = viewport.spanX / Double(width)
         let precision = viewport.precisionTerms
+        let kind = self.kind
+        let juliaC = self.juliaC
         let colorMode = self.colorMode
         let smoothingEnabled = self.smoothingEnabled
         let orbitTrap = self.orbitTrap
@@ -632,6 +661,8 @@ final class FractalRenderer: NSObject, ObservableObject, MTKViewDelegate {
                 maxIterations: iterations,
                 escapeRadius: 16.0,
                 precision: precision,
+                kind: kind,
+                juliaC: juliaC,
                 colorMode: colorMode,
                 smoothingEnabled: smoothingEnabled,
                 trap: orbitTrap,
@@ -737,7 +768,20 @@ final class FractalRenderer: NSObject, ObservableObject, MTKViewDelegate {
         encoder.endEncoding()
     }
 
-    private func makeOrReuseIterationTexture(width: Int, height: Int) -> MTLTexture? {
+    /// `seedFromPrevious`: when a texture needs (re)allocating at a new size,
+    /// seed it from a bilinear resample of whatever the previous texture
+    /// held instead of a flat blank. Used by the perturbation tier, whose
+    /// render size changes at the start/end of every interaction (full res
+    /// while idle, a smaller preview size while moving) -- without this, that
+    /// transition briefly presented a solid interior-colored frame while the
+    /// new size's async render was still in flight, since perturbation
+    /// results land progressively rather than synchronously like the GPU
+    /// tiers. Not used by the GPU tiers: their compute kernel fully
+    /// overwrites the whole texture in the same command buffer before the
+    /// palette pass ever samples it, so a plain blank is never visible there
+    /// and isn't worth the extra CPU-side readback/resample cost on every
+    /// one of their frequent adaptive-quality resizes.
+    private func makeOrReuseIterationTexture(width: Int, height: Int, seedFromPrevious: Bool = false) -> MTLTexture? {
         if let tex = iterationTexture, tex.width == width, tex.height == height {
             return tex
         }
@@ -746,17 +790,55 @@ final class FractalRenderer: NSObject, ObservableObject, MTKViewDelegate {
         desc.storageMode = .shared
         let tex = device.makeTexture(descriptor: desc)
         if let tex {
-            // A freshly-allocated texture's contents are undefined. Blank it
-            // to "interior" (-1) so a resize or new deep render reads as a
-            // calm, neutral color while progressive tiles are still landing,
-            // instead of a frame of uninitialized-memory noise.
-            let blank = [Float](repeating: -1, count: width * height)
-            blank.withUnsafeBytes { raw in
+            // A freshly-allocated texture's contents are undefined.
+            let seed = (seedFromPrevious ? resampledPreviousTexture(width: width, height: height) : nil)
+                ?? [Float](repeating: -1, count: width * height)
+            seed.withUnsafeBytes { raw in
                 tex.replace(region: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0, withBytes: raw.baseAddress!, bytesPerRow: width * MemoryLayout<Float>.stride)
             }
         }
         iterationTexture = tex
         return tex
+    }
+
+    /// Bilinearly stretches the current `iterationTexture`'s contents (if
+    /// any) into a buffer of the given new size. See `makeOrReuseIterationTexture`
+    /// for why this exists; `nil` when there's nothing yet to seed from
+    /// (first render ever, or a degenerate old size), in which case the
+    /// caller falls back to a flat blank exactly as before.
+    private func resampledPreviousTexture(width: Int, height: Int) -> [Float]? {
+        guard let old = iterationTexture, old.width > 1, old.height > 1 else { return nil }
+        let ow = old.width, oh = old.height
+        var src = [Float](repeating: -1, count: ow * oh)
+        src.withUnsafeMutableBytes { raw in
+            old.getBytes(raw.baseAddress!, bytesPerRow: ow * MemoryLayout<Float>.stride, from: MTLRegionMake2D(0, 0, ow, oh), mipmapLevel: 0)
+        }
+        var out = [Float](repeating: -1, count: width * height)
+        let sx = Double(ow) / Double(width)
+        let sy = Double(oh) / Double(height)
+        src.withUnsafeBufferPointer { s in
+            out.withUnsafeMutableBufferPointer { o in
+                for y in 0..<height {
+                    let fy = (Double(y) + 0.5) * sy - 0.5
+                    let y0 = max(0, min(oh - 1, Int(floor(fy))))
+                    let y1 = min(oh - 1, y0 + 1)
+                    let ty = Float(max(0, min(1, fy - Double(y0))))
+                    let row0 = y0 * ow, row1 = y1 * ow
+                    for x in 0..<width {
+                        let fx = (Double(x) + 0.5) * sx - 0.5
+                        let x0 = max(0, min(ow - 1, Int(floor(fx))))
+                        let x1 = min(ow - 1, x0 + 1)
+                        let tx = Float(max(0, min(1, fx - Double(x0))))
+                        let v00 = s[row0 + x0], v10 = s[row0 + x1]
+                        let v01 = s[row1 + x0], v11 = s[row1 + x1]
+                        let top = v00 + (v10 - v00) * tx
+                        let bot = v01 + (v11 - v01) * tx
+                        o[y * width + x] = top + (bot - top) * ty
+                    }
+                }
+            }
+        }
+        return out
     }
 
     // MARK: - Save image
@@ -782,7 +864,8 @@ final class FractalRenderer: NSObject, ObservableObject, MTKViewDelegate {
                 maxIterations: UInt32(maxIterations), escapeRadiusSq: 256.0,
                 colorMode: colorMode.rawValue,
                 smoothingEnabled: smoothingEnabled ? 1 : 0,
-                trapType: trap.type, trapParamX: trap.x, trapParamY: trap.y
+                trapType: trap.type, trapParamX: trap.x, trapParamY: trap.y,
+                mode: kind.rawValue, juliaC: SIMD2(Float(juliaC.x), Float(juliaC.y))
             )
             guard let pipeline = tier == .float32 ? pipelineFloat32 : pipelineDD else { completion(nil); return }
             guard let cb = queue.makeCommandBuffer(), let encoder = cb.makeComputeCommandEncoder() else { completion(nil); return }
@@ -803,6 +886,8 @@ final class FractalRenderer: NSObject, ObservableObject, MTKViewDelegate {
             let pixelSize = viewport.spanX / Double(width)
             let precision = viewport.precisionTerms
             let iterations = maxIterations
+            let kind = self.kind
+            let juliaC = self.juliaC
             let colorMode = self.colorMode
             let smoothingEnabled = self.smoothingEnabled
             let orbitTrap = self.orbitTrap
@@ -811,6 +896,7 @@ final class FractalRenderer: NSObject, ObservableObject, MTKViewDelegate {
                     centerDeep: centerDeep, pixelSize: pixelSize,
                     width: width, height: height,
                     maxIterations: iterations, escapeRadius: 16.0, precision: precision,
+                    kind: kind, juliaC: juliaC,
                     colorMode: colorMode, smoothingEnabled: smoothingEnabled, trap: orbitTrap
                 )
                 await MainActor.run { completion(result.values) }

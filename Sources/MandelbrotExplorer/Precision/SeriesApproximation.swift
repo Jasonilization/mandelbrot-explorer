@@ -38,7 +38,16 @@ struct SeriesApproximation {
 
     static let none = SeriesApproximation(coefficients: [], skipIterations: 0)
 
+    /// `kind` controls two things that differ between the two fractal
+    /// families sharing this same power-series machinery:
+    ///  - Mandelbrot: δz starts at 0 and picks up a bare "+δc" every single
+    ///    iteration (c is what varies per pixel).
+    ///  - Julia: δz starts at ε (the pixel's own z0 offset) *before* any
+    ///    iteration, and nothing is injected afterward (c is fixed and
+    ///    identical for the reference and every pixel, so it contributes
+    ///    nothing pixel-dependent past the initial condition).
     static func compute(
+        kind: FractalKind = .mandelbrot,
         referencePoints: [SIMD2<Double>],
         validIterationCount: Int,
         maxDeltaC: Double,
@@ -47,6 +56,7 @@ struct SeriesApproximation {
         guard validIterationCount > 1, maxDeltaC > 0 else { return .none }
         let k = order
         var A = [SIMD2<Double>](repeating: SIMD2(0, 0), count: k)
+        if kind == .julia { A[0] = SIMD2(1, 0) } // δz_0 = ε exactly, before iteration 0 runs
         var lastGood = A
         var lastGoodN = 0
 
@@ -54,10 +64,12 @@ struct SeriesApproximation {
         while n < validIterationCount {
             let Z = referencePoints[n]
             var newA = [SIMD2<Double>](repeating: SIMD2(0, 0), count: k)
-            // j=1: δz picks up a bare δc term every iteration, plus the
-            // existing series folded through the reference orbit (2·Z·δz).
+            // j=1: Mandelbrot's δz picks up a bare δc term every iteration on
+            // top of the existing series folded through the reference orbit
+            // (2·Z·δz); Julia has no such injection since δz already carries
+            // its whole per-pixel identity from the initial condition above.
             let twoZA0 = cadd(cmul(Z, A[0]), cmul(Z, A[0]))
-            newA[0] = cadd(twoZA0, SIMD2(1, 0))
+            newA[0] = (kind == .mandelbrot) ? cadd(twoZA0, SIMD2(1, 0)) : twoZA0
             if k > 1 {
                 for j in 2...k {
                     // δz² contributes a convolution of the existing series

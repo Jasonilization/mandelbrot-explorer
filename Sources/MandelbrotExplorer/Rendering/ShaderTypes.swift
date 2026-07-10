@@ -23,11 +23,18 @@ struct FractalParams {
     var trapParamX: Float
     /// Unused for circle/line / custom point y, depending on trapType.
     var trapParamY: Float
+    /// Raw value of `FractalKind`: 0 Mandelbrot, 1 Julia.
+    var mode: UInt32
+    /// Julia mode's fixed c parameter (unused for Mandelbrot). Plain float32
+    /// is plenty of precision -- unlike the coordinate fields above, this
+    /// value is never itself the target of deep zoom.
+    var juliaC: SIMD2<Float>
 
     init(centerHi: SIMD2<Float>, centerLo: SIMD2<Float>, spanX: Float, aspect: Float,
          width: UInt32, height: UInt32, maxIterations: UInt32, escapeRadiusSq: Float,
          colorMode: UInt32 = 0, smoothingEnabled: UInt32 = 1,
-         trapType: UInt32 = 0, trapParamX: Float = 0.5, trapParamY: Float = 0) {
+         trapType: UInt32 = 0, trapParamX: Float = 0.5, trapParamY: Float = 0,
+         mode: UInt32 = 0, juliaC: SIMD2<Float> = SIMD2(0, 0)) {
         self.centerHi = centerHi
         self.centerLo = centerLo
         self.spanX = spanX
@@ -41,6 +48,8 @@ struct FractalParams {
         self.trapType = trapType
         self.trapParamX = trapParamX
         self.trapParamY = trapParamY
+        self.mode = mode
+        self.juliaC = juliaC
     }
 }
 

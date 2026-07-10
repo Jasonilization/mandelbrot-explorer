@@ -2,8 +2,12 @@ import AppKit
 import SwiftUI
 
 struct ContentView: View {
-    @StateObject private var renderer = FractalRenderer()
+    @ObservedObject var renderer: FractalRenderer
     @StateObject private var recorder = FractalRecorder()
+    /// Called with a clicked point's fractal coordinate (double-click on the
+    /// canvas, or the sidebar's explicit button) to hand off to the Julia
+    /// tab. `nil` for any host that doesn't want that cross-tab affordance.
+    var onExploreJulia: ((SIMD2<Double>) -> Void)? = nil
     // Env-var gated like the other headless diagnostics (see App.swift):
     // lets verification screenshot the Help sheet without needing
     // accessibility permissions to click the toolbar button.
@@ -11,11 +15,11 @@ struct ContentView: View {
 
     var body: some View {
         NavigationSplitView {
-            SidebarView(renderer: renderer, recorder: recorder)
+            SidebarView(renderer: renderer, recorder: recorder, onExploreJulia: onExploreJulia)
         } detail: {
             VStack(spacing: 0) {
                 ZStack(alignment: .top) {
-                    MetalCanvasView(renderer: renderer)
+                    MetalCanvasView(renderer: renderer, onDoubleClick: onExploreJulia)
                     if !renderer.isReady {
                         LoadingOverlay()
                             .transition(.opacity)
@@ -43,7 +47,8 @@ struct ContentView: View {
 
 /// A small "recording in progress" pill over the canvas so it's obvious
 /// interaction is paused even if the settings sheet has been dismissed.
-private struct RecordingBanner: View {
+/// Internal (not private): reused by `JuliaContentView` too.
+struct RecordingBanner: View {
     @ObservedObject var recorder: FractalRecorder
 
     var body: some View {
@@ -60,8 +65,9 @@ private struct RecordingBanner: View {
 
 /// Covers the canvas while the Metal shader library compiles (see
 /// `FractalRenderer.buildPipelinesAsync`), so launch reads as "loading"
-/// rather than a stuck black window.
-private struct LoadingOverlay: View {
+/// rather than a stuck black window. Internal (not private): reused by
+/// `JuliaContentView` too.
+struct LoadingOverlay: View {
     var body: some View {
         VStack(spacing: 12) {
             ProgressView()

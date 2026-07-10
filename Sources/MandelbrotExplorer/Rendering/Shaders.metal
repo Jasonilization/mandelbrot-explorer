@@ -21,6 +21,8 @@ struct FractalParams {
     uint   trapType;       // 0 circle, 1 line, 2 cross, 3 custom point
     float  trapParamX;
     float  trapParamY;
+    uint   mode;           // 0 Mandelbrot, 1 Julia -- see FractalKind
+    float2 juliaC;         // Julia's fixed c parameter (unused for Mandelbrot)
 };
 
 #define COLOR_MODE_ESCAPE_TIME 0u
@@ -31,6 +33,9 @@ struct FractalParams {
 #define TRAP_LINE 1u
 #define TRAP_CROSS 2u
 #define TRAP_CUSTOM 3u
+
+#define MODE_MANDELBROT 0u
+#define MODE_JULIA 1u
 
 // Orbit trap distances naturally live in a tiny range (roughly [0, the trap's
 // own scale], often well under 1) compared to escape-time/distance-estimation
@@ -123,11 +128,22 @@ kernel void mandelbrotFloat32(texture2d<float, access::write> outTexture [[textu
     if (gid.x >= params.width || gid.y >= params.height) return;
 
     float pixelSize = params.spanX / float(params.width);
-    float cRe = params.centerHi.x + (float(gid.x) - float(params.width) * 0.5) * pixelSize;
-    float cIm = params.centerHi.y + (float(params.height) * 0.5 - float(gid.y)) * pixelSize;
+    // The pixel's own plane coordinate: Mandelbrot's per-pixel c, or Julia's
+    // per-pixel starting z0, depending on mode (see below).
+    float pRe = params.centerHi.x + (float(gid.x) - float(params.width) * 0.5) * pixelSize;
+    float pIm = params.centerHi.y + (float(params.height) * 0.5 - float(gid.y)) * pixelSize;
 
-    float zRe = 0.0, zIm = 0.0;
-    float dzRe = 0.0, dzIm = 0.0; // d(z)/d(c), for distance estimation
+    bool isJulia = params.mode == MODE_JULIA;
+    float zRe = isJulia ? pRe : 0.0;
+    float zIm = isJulia ? pIm : 0.0;
+    float addRe = isJulia ? params.juliaC.x : pRe;
+    float addIm = isJulia ? params.juliaC.y : pIm;
+
+    // d(z)/d(varying quantity), for distance estimation: d(z)/dc for
+    // Mandelbrot (seeded 0, since z0=0 doesn't depend on c) or d(z)/dz0 for
+    // Julia (seeded 1, the identity derivative at the starting point).
+    float dzRe = isJulia ? 1.0 : 0.0;
+    float dzIm = 0.0;
     float trapDist = 1e10;
     uint n = 0;
     float mag2 = 0.0;
@@ -137,22 +153,24 @@ kernel void mandelbrotFloat32(texture2d<float, access::write> outTexture [[textu
         mag2 = zRe2 + zIm2;
         if (mag2 > params.escapeRadiusSq) break;
 
-        // n > 0: skip the trivial z=(0,0) starting point -- a cross or line
-        // trap (both pass exactly through the origin by construction) would
-        // otherwise register a guaranteed, meaningless 0 for every single
-        // pixel right there, before any pixel-dependent structure exists.
-        if (params.colorMode == COLOR_MODE_ORBIT_TRAP && n > 0) {
+        // n > 0 (Mandelbrot only): skip the trivial z=(0,0) starting point --
+        // a cross or line trap (both pass exactly through the origin by
+        // construction) would otherwise register a guaranteed, meaningless 0
+        // for every single pixel right there, before any pixel-dependent
+        // structure exists. Julia's z at n=0 is the pixel-varying z0 itself,
+        // so it's kept.
+        if (params.colorMode == COLOR_MODE_ORBIT_TRAP && (n > 0 || isJulia)) {
             trapDist = min(trapDist, orbitTrapDistance(zRe, zIm, params.trapType, params.trapParamX, params.trapParamY));
         }
         if (params.colorMode == COLOR_MODE_DISTANCE_EST) {
-            float newDzRe = 2.0 * (zRe * dzRe - zIm * dzIm) + 1.0;
+            float newDzRe = 2.0 * (zRe * dzRe - zIm * dzIm) + (isJulia ? 0.0 : 1.0);
             float newDzIm = 2.0 * (zRe * dzIm + zIm * dzRe);
             dzRe = newDzRe;
             dzIm = newDzIm;
         }
 
-        float newIm = 2.0 * zRe * zIm + cIm;
-        zRe = zRe2 - zIm2 + cRe;
+        float newIm = 2.0 * zRe * zIm + addIm;
+        zRe = zRe2 - zIm2 + addRe;
         zIm = newIm;
     }
 
@@ -195,17 +213,28 @@ kernel void mandelbrotDoubleDouble(texture2d<float, access::write> outTexture [[
     float dxPix = (float(gid.x) - float(params.width) * 0.5) * pixelSize;
     float dyPix = (float(params.height) * 0.5 - float(gid.y)) * pixelSize;
 
-    DD cRe = dd_add(centerRe, dd_make(dxPix, 0.0));
-    DD cIm = dd_add(centerIm, dd_make(dyPix, 0.0));
+    // The pixel's own plane coordinate: Mandelbrot's per-pixel c, or Julia's
+    // per-pixel starting z0, depending on mode (see below).
+    DD pRe = dd_add(centerRe, dd_make(dxPix, 0.0));
+    DD pIm = dd_add(centerIm, dd_make(dyPix, 0.0));
 
-    DD zRe = dd_make(0.0, 0.0);
-    DD zIm = dd_make(0.0, 0.0);
+    bool isJulia = params.mode == MODE_JULIA;
+    DD zRe = isJulia ? pRe : dd_make(0.0, 0.0);
+    DD zIm = isJulia ? pIm : dd_make(0.0, 0.0);
+    // Julia's added constant is a single fixed value, never itself the
+    // target of deep zoom, so plain float precision (no low component) is
+    // plenty -- unlike the coordinate DDs above.
+    DD addRe = isJulia ? dd_make(params.juliaC.x, 0.0) : pRe;
+    DD addIm = isJulia ? dd_make(params.juliaC.y, 0.0) : pIm;
+
     // The coloring-only derivative/trap tracking below deliberately uses
     // plain float precision (the dd z's .hi component) rather than full
     // double-double arithmetic: distance estimation and orbit traps only
     // need a visually plausible gradient/trap distance, not positional
     // accuracy, and the actual escape-time iteration above is untouched.
-    float dzRe = 0.0, dzIm = 0.0;
+    // d(z)/d(varying quantity): d(z)/dc for Mandelbrot (seeded 0) or
+    // d(z)/dz0 for Julia (seeded 1, the identity derivative at the start).
+    float dzRe = isJulia ? 1.0 : 0.0, dzIm = 0.0;
     float trapDist = 1e10;
     uint n = 0;
     float mag2 = 0.0;
@@ -215,19 +244,20 @@ kernel void mandelbrotDoubleDouble(texture2d<float, access::write> outTexture [[
         mag2 = zRe2.hi + zIm2.hi;
         if (mag2 > params.escapeRadiusSq) break;
 
-        if (params.colorMode == COLOR_MODE_ORBIT_TRAP && n > 0) {
+        // See the matching guard in mandelbrotFloat32 for why Julia keeps n=0.
+        if (params.colorMode == COLOR_MODE_ORBIT_TRAP && (n > 0 || isJulia)) {
             trapDist = min(trapDist, orbitTrapDistance(zRe.hi, zIm.hi, params.trapType, params.trapParamX, params.trapParamY));
         }
         if (params.colorMode == COLOR_MODE_DISTANCE_EST) {
-            float newDzRe = 2.0 * (zRe.hi * dzRe - zIm.hi * dzIm) + 1.0;
+            float newDzRe = 2.0 * (zRe.hi * dzRe - zIm.hi * dzIm) + (isJulia ? 0.0 : 1.0);
             float newDzIm = 2.0 * (zRe.hi * dzIm + zIm.hi * dzRe);
             dzRe = newDzRe;
             dzIm = newDzIm;
         }
 
         DD twoZReZIm = dd_mul(dd_make(2.0 * zRe.hi, 2.0 * zRe.lo), zIm);
-        zIm = dd_add(twoZReZIm, cIm);
-        zRe = dd_add(dd_sub(zRe2, zIm2), cRe);
+        zIm = dd_add(twoZReZIm, addIm);
+        zRe = dd_add(dd_sub(zRe2, zIm2), addRe);
     }
 
     float value;

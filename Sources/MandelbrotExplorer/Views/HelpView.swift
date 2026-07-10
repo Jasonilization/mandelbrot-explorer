@@ -11,6 +11,7 @@ struct HelpView: View {
     enum HelpTopic: String, CaseIterable, Identifiable, Hashable {
         case whatIsMandelbrot = "What is the Mandelbrot Set?"
         case controls = "Controls"
+        case juliaSet = "Julia Set Explorer"
         case deepZoom = "Deep Zoom & Precision"
         case renderingModes = "Rendering Modes"
         case colorEngine = "Color Engine"
@@ -22,6 +23,7 @@ struct HelpView: View {
             switch self {
             case .whatIsMandelbrot: "sparkles"
             case .controls: "hand.draw"
+            case .juliaSet: "atom"
             case .deepZoom: "magnifyingglass"
             case .renderingModes: "cpu"
             case .colorEngine: "paintpalette"
@@ -60,6 +62,7 @@ struct HelpView: View {
         switch selection {
         case .whatIsMandelbrot: whatIsMandelbrotContent
         case .controls: controlsContent
+        case .juliaSet: juliaSetContent
         case .deepZoom: deepZoomContent
         case .renderingModes: renderingModesContent
         case .colorEngine: colorEngineContent
@@ -136,11 +139,66 @@ struct HelpView: View {
             ControlRow(icon: "scope", title: "Smart Auto Zoom", body: "Continuously zooms in on its own, steering toward detailed boundary structure and searching nearby if it wanders somewhere flat and boring.")
             ControlRow(icon: "video.badge.waveform", title: "Record Zoom Journey", body: "Renders an auto-zoom journey to a video file at full quality, independent of how fast your Mac can actually render it live.")
             ControlRow(icon: "square.and.arrow.down", title: "Save Image", body: "Exports the current view as a full-resolution PNG.")
+            ControlRow(icon: "atom", title: "Double-click a point", body: "Jumps to the Julia Set Explorer tab, using that exact point as its fixed c value -- see the Julia Set Explorer topic. The sidebar's \"Open Julia Set at Center\" button does the same for the current view's center.")
 
             Paragraph("""
             Iteration count normally auto-scales with zoom depth -- deeper zooms need more \
             iterations to resolve fine detail near the boundary. Touch the Iterations stepper \
             yourself to take manual control; it won't be silently overridden after that.
+            """)
+        }
+    }
+
+    // MARK: - Julia Set Explorer
+
+    private var juliaSetContent: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Heading("Julia Set Explorer")
+
+            Paragraph("""
+            The Julia Set Explorer uses the exact same rule as the Mandelbrot Set, z → z² + c, and the \
+            exact same rendering engine -- GPU tiers, perturbation for deep zoom, series approximation, \
+            progressive rendering, the whole color pipeline. The only thing that changes is which \
+            quantity is fixed and which one varies:
+            """)
+
+            FormulaBadge("z → z² + c")
+
+            BulletPoint(
+                title: "Mandelbrot: c varies, z starts at 0",
+                body: "Every pixel is a different value of c, and each one asks the same question: starting from z=0, does this c's orbit stay bounded?"
+            )
+            BulletPoint(
+                title: "Julia: c is fixed, z varies",
+                body: "One single c value applies to the entire image. Every pixel is a different starting value of z, and each one asks: starting from this z, does the orbit stay bounded under this one fixed c?"
+            )
+
+            Paragraph("""
+            The Mandelbrot set is a map of all possible Julia sets. Each point in the Mandelbrot set \
+            represents a different Julia universe -- points deep inside a bulb tend to produce Julia \
+            sets that are one connected blob; points out in the filaments and dust tend to produce Julia \
+            sets that shatter into disconnected, dust-like pieces. Points right on the boundary -- where \
+            the Mandelbrot set's own infinite detail lives -- tend to produce the most intricate Julia \
+            sets of all.
+            """)
+
+            BulletPoint(
+                title: "Jumping from Mandelbrot to Julia",
+                body: "Double-click any point in the Mandelbrot Explorer (or use its sidebar's \"Open Julia Set at Center\" button) to open the Julia Set Explorer with that exact point as c."
+            )
+            BulletPoint(
+                title: "Julia Parameter controls",
+                body: "Type exact real/imaginary values, drag their sliders for a live-updating preview, hit Random Julia for a c value biased toward the Mandelbrot set's richly-detailed boundary region, or jump straight to a named preset like Douady's Rabbit or San Marco."
+            )
+            BulletPoint(
+                title: "Favorites",
+                body: "Save any c value you land on with a name of your choosing; saved favorites persist between launches, just like custom palettes."
+            )
+
+            Paragraph("""
+            Everything else works exactly like the Mandelbrot tab: smooth zooming (including all the way \
+            down into perturbation-tier deep zoom on the Julia set's own boundary detail), the full color \
+            engine and palette editor, and the same PNG export and zoom-journey recording.
             """)
         }
     }

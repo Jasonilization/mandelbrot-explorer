@@ -1,14 +1,20 @@
 # Mandelbrot Explorer
 
 A high-performance, native fractal visualization suite for Apple Silicon,
-built with Swift, SwiftUI, and Metal. Two separate explorers live side by
-side in one app:
+built with Swift, SwiftUI, and Metal. Three separate explorers live side by
+side in one app, the first two sharing one exact rendering engine:
 
 - **Mandelbrot Explorer** -- GPU-accelerated compute shaders, adaptive
   render quality, three automatically-selected precision tiers (zoom from
   the full set down to ~10^100+ without the image breaking apart into
   pixelated noise), a professional color engine, and a smart auto-zoom that
   steers toward actual detail instead of flat, boring regions.
+- **Julia Set Explorer** -- the same z -> z^2 + c rule with the roles
+  swapped: c is fixed for the whole image and every pixel explores a
+  different starting z. Double-click any point in the Mandelbrot Explorer
+  to open its Julia set. Same rendering engine, same three precision tiers,
+  same color pipeline, same export/recording -- just a different fixed
+  parameter.
 - **Mandelbulb Explorer** -- a true 3D fractal, ray-marched in real time
   with lighting, ambient occlusion, and soft shadows.
 
@@ -67,6 +73,61 @@ identically across all three precision tiers:
   pivot point from the raw cursor position onto the most detailed nearby
   boundary structure, so zooming into fine detail doesn't need pixel-perfect
   aim.
+
+## Julia Set Explorer
+
+A separate tab that reuses the *exact same* `FractalRenderer` engine as the
+Mandelbrot tab (GPU float32/double-double tiers, CPU perturbation with
+series approximation and progressive tiled rendering, the full color
+pipeline, export, and recording) -- the two tabs are two configured
+instances of one shared renderer, not a duplicated implementation.
+
+Mandelbrot and Julia are the same rule, z -> z^2 + c, with the two
+complex quantities' roles swapped:
+
+- **Mandelbrot**: c varies -- every pixel is a different c, iterated from
+  z=0.
+- **Julia**: c is fixed for the whole image -- every pixel is a different
+  starting z, iterated under that one shared c.
+
+That swap runs all the way down through the rendering engine: the GPU
+kernels branch on it directly, and on the CPU perturbation tier the
+reference orbit's "start" and "added constant" trade places, and series
+approximation seeds at the pixel's own offset (Julia) instead of picking
+up a per-iteration injected delta (Mandelbrot) -- see the doc comments on
+`ReferenceOrbit.compute`, `SeriesApproximation.compute`, and
+`Perturbation.render` for the derivation. The upshot: Julia sets support
+the identical deep-zoom precision ladder as the Mandelbrot set, including
+perturbation-tier zoom into a Julia set's own boundary detail.
+
+- **Mandelbrot -> Julia handoff**: double-click any point in the
+  Mandelbrot Explorer (or use its sidebar's "Open Julia Set at Center"
+  button) to jump to the Julia Explorer with that exact point as c.
+- **Julia parameter controls**: type exact real/imaginary values with a
+  live-updating preview, drag sliders for quick exploration, hit Random
+  Julia (biased toward the Mandelbrot set's richly-detailed boundary
+  region rather than the mostly-uninteresting full plane), or jump to a
+  named preset (Douady's Rabbit, San Marco, Siegel Disk, and more).
+  Favorites persist between launches, like custom palettes.
+
+## Rendering quality during interaction
+
+During active pan/zoom, both the Mandelbrot and Julia tabs render at
+reduced resolution and iteration count to keep frame rate smooth, then
+automatically refine to full quality once movement stops -- and on the CPU
+perturbation tier, that render arrives progressively (tile by tile) rather
+than freezing the old frame until the whole buffer is ready.
+
+The one gap this closed: the perturbation tier's render resolution changes
+at the start and end of every interaction (a smaller preview size while
+moving, full resolution once settled), which requires a differently-sized
+iteration texture. Reallocating that texture used to blank it to a flat
+interior color for the instant before the new size's first results landed,
+which briefly flashed a blank frame right at the start and end of every
+interaction on a deep zoom. It's now seeded with a bilinear resample of
+whatever was on screen before, so that transition reads as an instant,
+if momentarily blurry, continuation of the same scene instead of a black
+flash -- see the doc comment on `FractalRenderer.makeOrReuseIterationTexture`.
 
 ## Mandelbulb Explorer
 
@@ -145,12 +206,21 @@ Mandelbrot tab:
 - **Scroll / mouse wheel**: zoom, centered on the cursor (or the nearest
   detailed structure, if Lock Cursor to Detail is on)
 - **Click + drag**: pan
+- **Double-click**: open that point's Julia set in the Julia Explorer tab
 - **Trackpad pinch**: zoom (bonus, in addition to the wheel)
-- Sidebar: presets, iteration count (auto-scales with zoom unless you
-  override it), render resolution, cursor lock, smart auto-zoom, recording,
-  color engine (mode/palette/shading), save image
+- Sidebar: presets, "Open Julia Set at Center", iteration count
+  (auto-scales with zoom unless you override it), render resolution,
+  cursor lock, smart auto-zoom, recording, color engine
+  (mode/palette/shading), save image
 - Status bar: live coordinates, zoom factor, rendering-mode indicator, FPS,
   render time
+
+Julia Set tab:
+- Same scroll/drag/pinch navigation as the Mandelbrot tab
+- Sidebar: c parameter (real/imaginary fields + sliders, live-updating),
+  Random Julia, presets, favorites, then the identical
+  rendering/interaction/auto-zoom/recording/color/export sections as the
+  Mandelbrot tab
 
 Mandelbulb tab:
 - **Click + drag**: orbit the camera
@@ -158,22 +228,26 @@ Mandelbulb tab:
 - Sidebar: presets, power/iterations/hollow variant, quality/resolution,
   lighting, reset camera, export
 
-Both tabs share a toolbar (GitHub profile link, built-in Help & Tutorial).
+All tabs share a toolbar (GitHub profile link, built-in Help & Tutorial).
 
 ## Project layout
 
 ```
 Sources/MandelbrotExplorer/
-  Model/        Viewport, presets, color palettes/modes/orbit traps,
-                precision-tier selection, auto-zoom interestingness scoring,
-                Mandelbulb presets/quality tiers
+  Model/        Viewport, presets (Mandelbrot + Julia), favorites, color
+                palettes/modes/orbit traps, precision-tier selection,
+                auto-zoom interestingness scoring, Mandelbulb
+                presets/quality tiers, FractalKind (Mandelbrot vs. Julia)
   Precision/    Arbitrary-precision "expansion" arithmetic, reference-orbit,
-                series approximation, and the CPU perturbation renderer
-  Rendering/    Metal compute shaders (2D Mandelbrot + 3D Mandelbulb) and
-                the two renderers that drive them
+                series approximation, and the CPU perturbation renderer --
+                all three shared by both the Mandelbrot and Julia tabs
+  Rendering/    Metal compute shaders (2D Mandelbrot/Julia + 3D Mandelbulb)
+                and the renderers that drive them
   Recording/    Offline zoom-journey capture to video (AVFoundation)
-  Views/        SwiftUI shell for both tabs (canvas, sidebar, status bar,
-                palette editor, help, recording)
+  Views/        SwiftUI shell for all three tabs (canvas, sidebars, status
+                bar, palette editor, help, recording) -- the
+                rendering/color/export sidebar sections are one shared
+                view reused by both the Mandelbrot and Julia sidebars
   Utils/        Save-image/screenshot, headless preview/diagnostic tooling
 ```
 
@@ -189,6 +263,10 @@ high-precision computation):
 - `PERTURBATION_DEBUG_SINGLE="re,im,zoom,iterations"` -- renders one
   perturbation-tier frame and cross-checks it against a direct
   arbitrary-precision computation.
+- `JULIA_TEST_DIR=<dir>` -- renders a handful of well-known Julia
+  constants (plus a deep perturbation-tier zoom) straight to PNGs.
+- `JULIA_DEBUG_SINGLE="z0real,z0imag,cReal,cImag,zoom,iterations"` -- the
+  Julia-mode counterpart to `PERTURBATION_DEBUG_SINGLE`.
 - `COLOR_MODE_TEST_DIR=<dir>` -- renders every color mode/orbit trap
   shape/shading combination at both a GPU-tier and a perturbation-tier
   zoom, straight to PNGs.

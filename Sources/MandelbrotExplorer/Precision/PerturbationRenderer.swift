@@ -71,6 +71,13 @@ enum Perturbation {
         }
     }
 
+    /// `kind`/`juliaC` select which fractal family `centerDeep` (the
+    /// arbitrary-precision viewport center) plays a role in: for Mandelbrot
+    /// it's the c-neighborhood being explored (z starts at 0, `juliaC` is
+    /// unused); for Julia it's the z0-neighborhood being explored against a
+    /// single fixed `juliaC` shared by the whole image. See `ReferenceOrbit`
+    /// and `SeriesApproximation` for how the two roles swap through the rest
+    /// of the pipeline.
     static func render(
         centerDeep: ComplexExpansion,
         pixelSize: Double,
@@ -79,6 +86,8 @@ enum Perturbation {
         maxIterations: Int,
         escapeRadius: Double,
         precision: Int,
+        kind: FractalKind = .mandelbrot,
+        juliaC: SIMD2<Double> = SIMD2(0, 0),
         colorMode: ColorMode = .escapeTime,
         smoothingEnabled: Bool = true,
         trap: OrbitTrapSettings = .default,
@@ -86,6 +95,11 @@ enum Perturbation {
         onTileComplete: (@Sendable (TileUpdate) -> Void)? = nil
     ) -> Result {
         let escapeR2 = escapeRadius * escapeRadius
+        // Julia's added constant never varies across re-reference rounds or
+        // pixels (unlike Mandelbrot's, which is the thing being explored) --
+        // a single low-term expansion built once from the plain-Double c the
+        // UI exposes is exact enough, since c itself is never "zoomed into."
+        let juliaCExpansion = ComplexExpansion(re: Expansion(juliaC.x), im: Expansion(juliaC.y))
         var values = [Float](repeating: -1, count: width * height)
         let halfW = Double(width) / 2
         let halfH = Double(height) / 2
@@ -111,12 +125,13 @@ enum Perturbation {
                 ComplexExpansion(re: Expansion(referenceOffset.x), im: Expansion(referenceOffset.y)),
                 precision: precision
             )
-            let orbit = ReferenceOrbit.compute(
-                center: referenceCenter,
-                maxIterations: maxIterations,
-                escapeRadiusSquared: escapeR2,
-                precision: precision
-            )
+            let orbit: ReferenceOrbit
+            switch kind {
+            case .mandelbrot:
+                orbit = ReferenceOrbit.compute(addedConstant: referenceCenter, maxIterations: maxIterations, escapeRadiusSquared: escapeR2, precision: precision)
+            case .julia:
+                orbit = ReferenceOrbit.compute(start: referenceCenter, addedConstant: juliaCExpansion, maxIterations: maxIterations, escapeRadiusSquared: escapeR2, precision: precision)
+            }
             let refPoints = orbit.points
             let refCount = refPoints.count
 
@@ -129,6 +144,7 @@ enum Perturbation {
             let maxDcyAbs = max(abs(dcy[0] - referenceOffset.y), abs(dcy[height - 1] - referenceOffset.y))
             let maxDeltaC = (maxDcxAbs * maxDcxAbs + maxDcyAbs * maxDcyAbs).squareRoot()
             let sa = SeriesApproximation.compute(
+                kind: kind,
                 referencePoints: refPoints,
                 validIterationCount: validIterationCount,
                 maxDeltaC: maxDeltaC
@@ -149,10 +165,13 @@ enum Perturbation {
             // happens to find.
             var sharedTrapDist = Double.greatestFiniteMagnitude
             if colorMode == .orbitTrap, sa.skipIterations > 0 {
-                // i=0 excluded: the reference orbit's z_0 is exactly (0,0),
-                // which trivially lies on a cross/line trap's origin-crossing
-                // shape -- see the matching guard in the per-pixel loop below.
-                for i in 1..<sa.skipIterations {
+                // i=0 excluded for Mandelbrot only: its reference orbit's z_0
+                // is exactly (0,0), which trivially lies on a cross/line
+                // trap's origin-crossing shape -- see the matching guard in
+                // the per-pixel loop below. Julia's z_0 is the pixel-varying
+                // coordinate itself, genuinely meaningful even at i=0.
+                let trapStartIndex = (kind == .julia) ? 0 : 1
+                for i in trapStartIndex..<sa.skipIterations {
                     let Z = refPoints[i]
                     sharedTrapDist = min(sharedTrapDist, trapDistance(zRe: Z.x, zIm: Z.y, trap: trap))
                 }
@@ -162,6 +181,14 @@ enum Perturbation {
             // and the flat glitch-retry passes below. δz starts wherever SA
             // leaves off instead of at n=0 -- everything before that point
             // is, by construction, identical across every pixel in this frame.
+            // Mandelbrot injects a bare +δc into δz every iteration (c is
+            // what varies per pixel); Julia injects nothing after its
+            // initial condition (c is fixed and shared, so it contributes no
+            // further pixel-dependent term). Hoisted out of the per-pixel
+            // closure since they don't depend on the pixel itself.
+            let dzInjectionEnabled = kind == .mandelbrot
+            let derivInjection: Double = kind == .mandelbrot ? 1.0 : 0.0
+
             func computePixel(x: Int, y: Int, idx: Int) -> (value: Float, glitched: Bool) {
                 let dcRe = dcx[x] - referenceOffset.x
                 let dcIm = dcy[y] - referenceOffset.y
@@ -183,7 +210,19 @@ enum Perturbation {
                         derivRe = d0.x
                         derivIm = d0.y
                     }
+                } else if kind == .julia {
+                    // No SA coverage yet: seed directly from the initial
+                    // condition δz_0 = ε (this pixel's own z0 offset from the
+                    // reference) and the matching identity derivative
+                    // d(z_0)/d(z0) = 1.
+                    dzRe = dcRe
+                    dzIm = dcIm
+                    if colorMode == .distanceEstimation {
+                        derivRe = 1.0
+                    }
                 }
+                let injectRe = dzInjectionEnabled ? dcRe : 0.0
+                let injectIm = dzInjectionEnabled ? dcIm : 0.0
 
                 var glitched = false
                 var escaped = false
@@ -211,21 +250,22 @@ enum Perturbation {
                         break
                     }
 
-                    // n > 0: see the matching guard in Shaders.metal -- z at
-                    // n=0 is always exactly (0,0), a trivial hit for any
-                    // origin-crossing trap shape.
-                    if colorMode == .orbitTrap, n > 0 {
+                    // n > 0 (Mandelbrot only): see the matching guard in
+                    // Shaders.metal -- z at n=0 is always exactly (0,0), a
+                    // trivial hit for any origin-crossing trap shape. Julia's
+                    // z at n=0 is the pixel-varying z0 itself, so it's kept.
+                    if colorMode == .orbitTrap, n > 0 || kind == .julia {
                         trapDist = min(trapDist, trapDistance(zRe: zRe, zIm: zIm, trap: trap))
                     }
                     if colorMode == .distanceEstimation {
-                        let newDerivRe = 2 * (zRe * derivRe - zIm * derivIm) + 1
+                        let newDerivRe = 2 * (zRe * derivRe - zIm * derivIm) + derivInjection
                         let newDerivIm = 2 * (zRe * derivIm + zIm * derivRe)
                         derivRe = newDerivRe
                         derivIm = newDerivIm
                     }
 
-                    let newDzRe = 2 * (Z.x * dzRe - Z.y * dzIm) + (dzRe * dzRe - dzIm * dzIm) + dcRe
-                    let newDzIm = 2 * (Z.x * dzIm + Z.y * dzRe) + 2 * dzRe * dzIm + dcIm
+                    let newDzRe = 2 * (Z.x * dzRe - Z.y * dzIm) + (dzRe * dzRe - dzIm * dzIm) + injectRe
+                    let newDzIm = 2 * (Z.x * dzIm + Z.y * dzRe) + 2 * dzRe * dzIm + injectIm
                     dzRe = newDzRe
                     dzIm = newDzIm
                     n += 1

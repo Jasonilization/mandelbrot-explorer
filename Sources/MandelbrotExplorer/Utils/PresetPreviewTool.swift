@@ -245,6 +245,121 @@ enum PresetPreviewTool {
         exit(0)
     }
 
+    /// Definitive numeric cross-check for Julia-mode perturbation: iterates a
+    /// specific pixel's *exact* z0 value directly at full arbitrary
+    /// precision (no perturbation at all) and compares its escape iteration
+    /// to what `Perturbation.render(kind: .julia, ...)` reports for the same
+    /// pixel -- mirrors `runSingle`'s Mandelbrot cross-check. Activated by
+    /// JULIA_DEBUG_SINGLE, spec format "z0real,z0imag,cReal,cImag,zoom,iterations".
+    static func runJuliaSingle(spec: String) {
+        let parts = spec.split(separator: ",").map(String.init)
+        guard parts.count == 6, let cRe = Double(parts[2]), let cIm = Double(parts[3]),
+              let zoom = Double(parts[4]), let iters = Int(parts[5]) else {
+            logErr("bad spec, expected z0real,z0imag,cReal,cImag,zoom,iterations")
+            exit(1)
+        }
+        let precision = requiredPrecisionTerms(forZoom: zoom)
+        let re = Expansion(decimalString: parts[0], precision: precision)
+        let im = Expansion(decimalString: parts[1], precision: precision)
+        let center = ComplexExpansion(re: re, im: im) // the explored z0 neighborhood's center
+        let juliaC = SIMD2(cRe, cIm)
+        let cExpansion = ComplexExpansion(re: Expansion(cRe), im: Expansion(cIm))
+        let pixelSize = (Viewport.initialSpanX / zoom) / 900
+        logErr("center(z0)=\(center.approximateValue) c=\(juliaC) zoom=\(zoom) precisionTerms=\(precision) pixelSize=\(pixelSize) iters=\(iters)")
+
+        let orbit = ReferenceOrbit.compute(start: center, addedConstant: cExpansion, maxIterations: iters, escapeRadiusSquared: 256, precision: precision)
+        logErr("referenceOrbit points=\(orbit.points.count) escapedAt=\(String(describing: orbit.escapedAtIteration))")
+
+        let dcRe = -450.0 * pixelSize
+        let dcIm = 280.0 * pixelSize
+        let pixelZ0 = center.adding(ComplexExpansion(re: Expansion(dcRe), im: Expansion(dcIm)), precision: precision)
+        var z = pixelZ0
+        var directEscapeN: Int? = nil
+        var n = 0
+        while n < iters {
+            z = z.squared(precision: precision).adding(cExpansion, precision: precision)
+            n += 1
+            let a = z.approximateValue
+            if a.x * a.x + a.y * a.y > 256 { directEscapeN = n; break }
+        }
+        logErr("DIRECT pixel(0,0) escapeN=\(String(describing: directEscapeN))")
+        let result = Perturbation.render(
+            centerDeep: center, pixelSize: pixelSize,
+            width: 900, height: 560,
+            maxIterations: iters, escapeRadius: 16.0, precision: precision,
+            kind: .julia, juliaC: juliaC
+        )
+        logErr("PERTURBATION pixel(0,0) smoothValue=\(result.values[0]) seriesApproximationSkip=\(result.seriesApproximationSkip) referenceOrbitIterations=\(result.referenceOrbitIterations)")
+        exit(0)
+    }
+
+    /// Headless correctness check for the Julia explorer: renders a handful
+    /// of well-known Julia constants at the GPU float32 tier, plus one deep
+    /// zoom (well past the perturbation-tier threshold) to exercise the
+    /// Julia-mode reference-orbit/series-approximation math -- straight to
+    /// PNG, no window needed. Activated by JULIA_TEST_DIR.
+    static func runJuliaTest(outputDir: String) {
+        try? FileManager.default.createDirectory(atPath: outputDir, withIntermediateDirectories: true)
+        let renderer = FractalRenderer(kind: .julia)
+        waitUntilReady(renderer)
+        let size = CGSize(width: 480, height: 300)
+
+        func capture(_ name: String, configure: () -> Void) {
+            configure()
+            var done = false
+            renderer.captureFullQualityImage(size: size) { image in
+                defer { done = true }
+                guard let image else { logErr("FAILED \(name)"); return }
+                let rep = NSBitmapImageRep(cgImage: image)
+                if let data = rep.representation(using: .png, properties: [:]) {
+                    try? data.write(to: URL(fileURLWithPath: "\(outputDir)/\(name).png"))
+                    logErr("wrote \(name) tier=\(renderer.viewport.tier.label)")
+                }
+            }
+            let deadline = Date().addingTimeInterval(60)
+            while !done && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+            if !done { logErr("TIMEOUT \(name)") }
+        }
+
+        let constants: [(String, SIMD2<Double>)] = [
+            ("dendrite", SIMD2(-0.4, 0.6)),
+            ("douady_rabbit", SIMD2(-0.123, 0.745)),
+            ("san_marco", SIMD2(-0.75, 0.0)),
+            ("siegel_disk", SIMD2(-0.390541, -0.586788)),
+        ]
+        for (name, c) in constants {
+            capture("julia_\(name)") { renderer.juliaC = c }
+        }
+
+        capture("julia_orbit_trap") {
+            renderer.juliaC = SIMD2(-0.8, 0.156)
+            renderer.colorMode = .orbitTrap
+            renderer.orbitTrap = OrbitTrapSettings(type: .circle)
+        }
+        capture("julia_distance_estimation") {
+            renderer.colorMode = .distanceEstimation
+        }
+
+        // Deep zoom into a Julia set's own boundary detail, well past the
+        // perturbation-tier threshold -- exercises the Julia-mode reference
+        // orbit (start = z0, added constant = fixed c) and series
+        // approximation (seeded at ε rather than 0, no per-iteration
+        // injection) end to end.
+        capture("julia_deep_perturbation") {
+            renderer.colorMode = .escapeTime
+            renderer.juliaC = SIMD2(-0.4, 0.6)
+            let zoom = 1e16
+            let precision = requiredPrecisionTerms(forZoom: zoom)
+            let re = Expansion(decimalString: "0.0", precision: precision)
+            let im = Expansion(decimalString: "0.0", precision: precision)
+            renderer.viewport = Viewport(center: ComplexExpansion(re: re, im: im), spanX: Viewport.initialSpanX / zoom)
+            renderer.maxIterations = 2000
+        }
+
+        logErr("DONE")
+        exit(0)
+    }
+
     /// Renders a square, high-color-contrast crop for use as the app icon.
     static func renderIcon(to path: String) {
         let renderer = FractalRenderer()
@@ -289,7 +404,7 @@ enum PresetPreviewTool {
         // the reference orbit (sum of log2(2*|Z_k|)) to check whether slow
         // per-pixel divergence is a real property of this orbit or a bug in
         // the dz recurrence.
-        let orbit = ReferenceOrbit.compute(center: center, maxIterations: iters, escapeRadiusSquared: 256, precision: precision)
+        let orbit = ReferenceOrbit.compute(addedConstant: center, maxIterations: iters, escapeRadiusSquared: 256, precision: precision)
         var logGrowth = 0.0
         for z in orbit.points {
             let mag = (z.x * z.x + z.y * z.y).squareRoot()
