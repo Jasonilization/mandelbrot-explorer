@@ -2,7 +2,9 @@ import SwiftUI
 
 struct SidebarView: View {
     @ObservedObject var renderer: FractalRenderer
+    @ObservedObject var recorder: FractalRecorder
     @State private var iterationsText: String = ""
+    @State private var showingRecorder = false
 
     var body: some View {
         Form {
@@ -54,11 +56,35 @@ struct SidebarView: View {
             }
 
             Section("Auto Zoom") {
-                Toggle("Smooth Auto Zoom", isOn: $renderer.isAutoZooming)
+                Toggle("Smart Auto Zoom", isOn: $renderer.isAutoZooming)
+                    .disabled(renderer.isInputLocked)
 
                 VStack(alignment: .leading) {
                     Text("Speed")
                     Slider(value: $renderer.autoZoomSpeed, in: 1.03...1.6)
+                }
+                .disabled(renderer.isInputLocked)
+
+                if renderer.isAutoZooming {
+                    Label(
+                        renderer.isAutoZoomSearching ? "Searching for detail…" : "Steering toward detail",
+                        systemImage: renderer.isAutoZoomSearching ? "binoculars" : "scope"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+            }
+
+            Section("Recording") {
+                Button {
+                    showingRecorder = true
+                } label: {
+                    Label("Record Zoom Journey…", systemImage: "video.badge.waveform")
+                }
+                if recorder.isActive {
+                    Label("Recording in progress", systemImage: "record.circle")
+                        .font(.caption)
+                        .foregroundStyle(.red)
                 }
             }
 
@@ -90,5 +116,8 @@ struct SidebarView: View {
         }
         .formStyle(.grouped)
         .frame(minWidth: 260, idealWidth: 280)
+        .sheet(isPresented: $showingRecorder) {
+            RecordingView(renderer: renderer, recorder: recorder)
+        }
     }
 }

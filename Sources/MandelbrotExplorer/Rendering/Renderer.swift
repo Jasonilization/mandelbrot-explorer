@@ -8,6 +8,10 @@ import simd
 final class FractalRenderer: NSObject, ObservableObject, MTKViewDelegate {
     @Published var viewport: Viewport = .initial() { didSet { autoAdjustIterationsIfNeeded(); wake() } }
     @Published var maxIterations: Int = 500 { didSet { wake() } }
+    /// True while `FractalRecorder` has taken over the viewport to drive an
+    /// offline zoom journey. Blocks manual pan/zoom/pinch and the live
+    /// auto-zoom toggle so the two never fight over the same camera state.
+    @Published var isInputLocked: Bool = false
     @Published var palette: ColorPalette = .default { didSet { rebuildStopsBuffer(); wake() } }
     @Published var colorScale: Float = 1.0 { didSet { wake() } }
     @Published var colorOffset: Float = 0.0 { didSet { wake() } }
@@ -51,17 +55,40 @@ final class FractalRenderer: NSObject, ObservableObject, MTKViewDelegate {
     /// treatment so continuous motion never spikes CPU/GPU usage.
     var isAnimating: Bool { isInteracting || isAutoZooming }
 
-    /// Continuously and smoothly zooms toward the center of the view when
-    /// enabled. Cancelled by any manual pan/zoom/pinch.
+    /// Continuously and smoothly zooms when enabled, steering toward
+    /// visually rich boundary structure (see `AutoZoomScoring`) instead of
+    /// diving straight ahead -- otherwise it's just as likely to plunge into
+    /// a flat interior lake as real detail. Cancelled by any manual
+    /// pan/zoom/pinch.
     @Published var isAutoZooming: Bool = false {
         didSet {
             guard isAutoZooming, !oldValue else { return }
             autoZoomLastTimestamp = CACurrentMediaTime()
+            resetAutoZoomSteering()
             wake()
         }
     }
     /// Zoom multiplier applied per second of auto-zoom, e.g. 1.15 = 15%/sec.
     @Published var autoZoomSpeed: Double = 1.15
+    /// True while auto-zoom has decided the current view is boring (flat
+    /// interior or featureless exterior) and is backing off / sweeping
+    /// around to find structure again, rather than zooming further in.
+    /// Purely informational, for a status indicator.
+    @Published var isAutoZoomSearching: Bool = false
+
+    /// Steering target for auto-zoom, normalized [-1, 1] (0,0 = screen
+    /// center), re-scored periodically from the last rendered frame.
+    private var autoZoomTargetOffset = CGPoint.zero
+    /// Eased toward `autoZoomTargetOffset` every frame so direction changes
+    /// read as a smooth drift rather than a snap -- this is the point
+    /// actually passed to `viewport.zoom(aroundScreenPoint:)`.
+    private var autoZoomCurrentOffset = CGPoint.zero
+    private var autoZoomLastScoreTime: CFTimeInterval = -1
+    private var autoZoomBoringStreak = 0
+    private var autoZoomSearchAngle: Double = 0
+    /// Eased +1 (zooming in) / -1 (backing out while searching), so the
+    /// bored <-> interested transition is a smooth ramp, not a hard cut.
+    private var autoZoomDirection: Double = 1.0
 
     private var autoZoomLastTimestamp: CFTimeInterval = CACurrentMediaTime()
 
@@ -281,25 +308,120 @@ final class FractalRenderer: NSObject, ObservableObject, MTKViewDelegate {
         }
     }
 
-    /// Applies one frame's worth of smooth, frame-rate-independent zoom
-    /// toward the center of the view. Runs from `draw(in:)` rather than a
-    /// separate timer so it naturally shares the same GPU-driven cadence
-    /// (and reduced quality/iterations via `isAnimating`) as manual
-    /// interaction, instead of fighting it for control of the frame rate.
+    /// Applies one frame's worth of smooth, frame-rate-independent zoom,
+    /// steered toward interesting boundary structure rather than dead
+    /// center. Runs from `draw(in:)` rather than a separate timer so it
+    /// naturally shares the same GPU-driven cadence (and reduced
+    /// quality/iterations via `isAnimating`) as manual interaction, instead
+    /// of fighting it for control of the frame rate.
     private func stepAutoZoom(now: CFTimeInterval, viewSize: CGSize) {
         defer { autoZoomLastTimestamp = now }
         guard viewSize.width > 1, viewSize.height > 1 else { return }
         let dt = min(0.1, max(0, now - autoZoomLastTimestamp))
         guard dt > 0 else { return }
+        updateAutoZoomSteering(now: now)
+        if !advanceAutoZoom(dt: dt, viewSize: viewSize) {
+            isAutoZooming = false
+        }
+    }
+
+    /// Advances the smart-steered auto-zoom camera by exactly `dt` seconds'
+    /// worth of motion and returns `false` once it's hit the precision
+    /// floor (nothing further to do). Split out from `stepAutoZoom` so
+    /// `FractalRecorder` can drive the identical steered path at a fixed
+    /// per-output-frame dt, independent of how long each frame actually
+    /// took to render -- recording should never be paced by live frame
+    /// timing.
+    @discardableResult
+    func advanceAutoZoom(dt: Double, viewSize: CGSize) -> Bool {
+        guard viewSize.width > 1, viewSize.height > 1, dt > 0 else { return true }
         guard viewport.spanX > Viewport.minSpanX * 1.0001 else {
             // Hit the precision floor -- further zoom wouldn't change
             // anything, so stop rather than spin forever.
-            isAutoZooming = false
-            return
+            return false
         }
-        let factor = pow(autoZoomSpeed, dt)
-        let center = CGPoint(x: viewSize.width / 2, y: viewSize.height / 2)
-        viewport.zoom(by: factor, aroundScreenPoint: center, viewSize: viewSize)
+
+        // Ease both the steering point and the zoom direction toward their
+        // latest targets every frame, so a newly-found interesting cell (or
+        // a search sweep kicking in) reads as a continuous drift rather
+        // than the camera snapping or jerking.
+        let posEase = min(1.0, dt * 2.0)
+        autoZoomCurrentOffset.x += (autoZoomTargetOffset.x - autoZoomCurrentOffset.x) * posEase
+        autoZoomCurrentOffset.y += (autoZoomTargetOffset.y - autoZoomCurrentOffset.y) * posEase
+
+        let targetDirection = autoZoomBoringStreak >= 2 ? -1.0 : 1.0
+        let dirEase = min(1.0, dt * 1.5)
+        autoZoomDirection += (targetDirection - autoZoomDirection) * dirEase
+        isAutoZoomSearching = autoZoomBoringStreak >= 2
+
+        let pivot = CGPoint(
+            x: Double(viewSize.width) / 2 * (1 + autoZoomCurrentOffset.x),
+            y: Double(viewSize.height) / 2 * (1 + autoZoomCurrentOffset.y)
+        )
+        let factor = pow(autoZoomSpeed, dt * autoZoomDirection)
+        viewport.zoom(by: factor, aroundScreenPoint: pivot, viewSize: viewSize)
+        return true
+    }
+
+    /// Re-scores auto-zoom's steering target from a rendered mu buffer (see
+    /// `AutoZoomScoring`) at a fixed cadence during live interaction --
+    /// re-reading back the on-screen texture every frame would be pointless
+    /// when the image has barely changed since the last tick. `snapshot`
+    /// lets `FractalRecorder` drive this from its own just-rendered frame
+    /// instead of whatever happens to be in `iterationTexture` live.
+    ///
+    /// When nothing on screen clears the boredom threshold -- a flat
+    /// interior lake, or featureless exterior far from the set -- sweeps
+    /// the target around nearby instead, so a boring landing spot gets
+    /// searched out of rather than zoomed straight into.
+    func updateAutoZoomSteering(now: CFTimeInterval? = nil, snapshot: (values: [Float], width: Int, height: Int)? = nil) {
+        if let now {
+            guard autoZoomLastScoreTime < 0 || now - autoZoomLastScoreTime > 0.25 else { return }
+            autoZoomLastScoreTime = now
+        }
+        guard let snapshot = snapshot ?? currentIterationSnapshot() else { return }
+        guard let target = AutoZoomScoring.bestTarget(values: snapshot.values, width: snapshot.width, height: snapshot.height) else { return }
+
+        if target.score >= AutoZoomScoring.boringThreshold {
+            autoZoomBoringStreak = 0
+            // Blend rather than snap: keeps the journey continuous even
+            // when the most interesting cell hops across the frame between
+            // scoring ticks.
+            autoZoomTargetOffset.x = autoZoomTargetOffset.x * 0.5 + target.offset.x * 0.5
+            autoZoomTargetOffset.y = autoZoomTargetOffset.y * 0.5 + target.offset.y * 0.5
+        } else {
+            autoZoomBoringStreak += 1
+            autoZoomSearchAngle += 0.9
+            let radius = min(0.85, 0.35 + Double(autoZoomBoringStreak) * 0.12)
+            autoZoomTargetOffset = CGPoint(x: cos(autoZoomSearchAngle) * radius, y: sin(autoZoomSearchAngle) * radius)
+        }
+    }
+
+    /// Resets auto-zoom's steering state to a clean slate. Called both when
+    /// the live toggle switches on and before `FractalRecorder` starts a
+    /// fresh journey, so neither inherits a stale target/search angle from
+    /// a previous run.
+    func resetAutoZoomSteering() {
+        autoZoomTargetOffset = .zero
+        autoZoomCurrentOffset = .zero
+        autoZoomLastScoreTime = -1
+        autoZoomBoringStreak = 0
+        autoZoomDirection = 1.0
+        isAutoZoomSearching = false
+    }
+
+    /// Cheap CPU-side copy of the texture that was actually presented last
+    /// frame -- called from the top of `draw(in:)` before this frame's own
+    /// render is encoded, so there's no race with the GPU still writing it.
+    private func currentIterationSnapshot() -> (values: [Float], width: Int, height: Int)? {
+        guard let tex = iterationTexture else { return nil }
+        let w = tex.width, h = tex.height
+        guard w > 4, h > 4 else { return nil }
+        var values = [Float](repeating: -1, count: w * h)
+        values.withUnsafeMutableBytes { raw in
+            tex.getBytes(raw.baseAddress!, bytesPerRow: w * MemoryLayout<Float>.stride, from: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0)
+        }
+        return (values, w, h)
     }
 
     private func updateFPS(frameSeconds: Double) {
@@ -609,15 +731,26 @@ final class FractalRenderer: NSObject, ObservableObject, MTKViewDelegate {
     }
 
     func captureFullQualityImage(size: CGSize, completion: @escaping (CGImage?) -> Void) {
+        captureFrameForRecording(size: size) { image, _ in completion(image) }
+    }
+
+    /// Same full-quality offscreen render as `captureFullQualityImage`, but
+    /// also hands back the raw per-pixel mu buffer alongside the image.
+    /// `FractalRecorder` uses this to steer the next journey step from the
+    /// frame it just encoded instead of paying for a second, redundant
+    /// render purely to re-score.
+    func captureFrameForRecording(size: CGSize, completion: @escaping (CGImage?, [Float]?) -> Void) {
         let width = max(8, Int(size.width))
         let height = max(8, Int(size.height))
         computeIterationValues(width: width, height: height) { [weak self] values in
-            guard let self, let values else { completion(nil); return }
-            guard let srcTex = self.makeStandaloneTexture(width: width, height: height) else { completion(nil); return }
+            guard let self, let values else { completion(nil, nil); return }
+            guard let srcTex = self.makeStandaloneTexture(width: width, height: height) else { completion(nil, nil); return }
             values.withUnsafeBytes { raw in
                 srcTex.replace(region: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0, withBytes: raw.baseAddress!, bytesPerRow: width * MemoryLayout<Float>.stride)
             }
-            self.renderOffscreenAndReadback(source: srcTex, width: width, height: height, completion: completion)
+            self.renderOffscreenAndReadback(source: srcTex, width: width, height: height) { image in
+                completion(image, values)
+            }
         }
     }
 

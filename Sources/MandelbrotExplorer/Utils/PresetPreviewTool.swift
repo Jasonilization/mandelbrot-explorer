@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 import Foundation
 
 /// Headless verification path: renders every preset, plus a zoom-depth
@@ -218,6 +219,60 @@ enum PresetPreviewTool {
         var uniqueValues = Set<Float>()
         for v in values { if v >= 0 { escaped += 1 }; uniqueValues.insert(v) }
         logErr("escaped=\(escaped)/\(values.count) uniqueValueCount=\(uniqueValues.count) sampleUniqueValues=\(uniqueValues.prefix(10)) seriesApproximationSkip=\(result.seriesApproximationSkip) referenceOrbitIterations=\(result.referenceOrbitIterations)")
+        exit(0)
+    }
+
+    /// Headless correctness check for `FractalRecorder`: records a short
+    /// clip and pulls a mid-clip frame back out as a PNG next to it, so
+    /// orientation/overlay/codec problems show up as a plain image rather
+    /// than requiring a person to click through the record UI and eyeball
+    /// a QuickTime window. Activated by RECORDING_TEST_PATH (path to the
+    /// .mov to write).
+    static func runRecordingTest(outputPath: String) {
+        let renderer = FractalRenderer()
+        waitUntilReady(renderer)
+        if let seahorse = Preset.all.first(where: { $0.id == "seahorse" }) {
+            renderer.viewport = seahorse.makeViewport()
+            renderer.maxIterations = seahorse.suggestedIterations
+        }
+
+        let recorder = FractalRecorder()
+        var settings = RecordingSettings()
+        settings.resolution = .hd720
+        settings.fps = 10
+        settings.durationSeconds = 2
+        settings.showZoomOverlay = true
+
+        let url = URL(fileURLWithPath: outputPath)
+        recorder.start(renderer: renderer, settings: settings, outputURL: url)
+
+        let deadline = Date().addingTimeInterval(90)
+        while recorder.isActive && Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        logErr("recording phase=\(recorder.phase) frames=\(recorder.currentFrame)/\(recorder.totalFrames)")
+
+        guard case .finished(let finishedURL) = recorder.phase else { exit(1) }
+        let asset = AVURLAsset(url: finishedURL)
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.appliesPreferredTrackTransform = true
+        generator.requestedTimeToleranceBefore = .zero
+        generator.requestedTimeToleranceAfter = .zero
+        for frac: Double in [0.0, 0.25, 0.5, 0.75, 0.95] {
+            let thumbTime = CMTime(seconds: settings.durationSeconds * frac, preferredTimescale: 600)
+            do {
+                var actual = CMTime.zero
+                let cgImage = try generator.copyCGImage(at: thumbTime, actualTime: &actual)
+                let rep = NSBitmapImageRep(cgImage: cgImage)
+                if let data = rep.representation(using: .png, properties: [:]) {
+                    let thumbURL = finishedURL.deletingPathExtension().appendingPathExtension("thumb_\(Int(frac * 100)).png")
+                    try data.write(to: thumbURL)
+                    logErr("wrote thumbnail to \(thumbURL.path) requested=\(thumbTime.seconds)s actual=\(actual.seconds)s size=\(cgImage.width)x\(cgImage.height)")
+                }
+            } catch {
+                logErr("thumbnail extraction FAILED at frac=\(frac): \(error)")
+            }
+        }
         exit(0)
     }
 }

@@ -47,12 +47,14 @@ struct MetalCanvasView: NSViewRepresentable {
         }
 
         func mouseDown(at point: CGPoint) {
+            guard !renderer.isInputLocked else { return }
             lastDragPoint = point
             renderer.markInteractionBegan()
         }
 
         func mouseDragged(to point: CGPoint) {
             defer { lastDragPoint = point }
+            guard !renderer.isInputLocked else { return }
             guard let last = lastDragPoint else { return }
             let dx = point.x - last.x
             let dyAppKit = point.y - last.y
@@ -62,11 +64,12 @@ struct MetalCanvasView: NSViewRepresentable {
 
         func mouseUp() {
             lastDragPoint = nil
+            guard !renderer.isInputLocked else { return }
             renderer.markInteractionEnded()
         }
 
         func scroll(deltaY: CGFloat, appKitLocation: CGPoint, viewSize: CGSize) {
-            guard deltaY != 0 else { return }
+            guard !renderer.isInputLocked, deltaY != 0 else { return }
             renderer.markInteractionBegan()
             let factor = pow(1.0035, Double(deltaY) * 6.0)
             let imageSpacePoint = CGPoint(x: appKitLocation.x, y: viewSize.height - appKitLocation.y)
@@ -75,6 +78,7 @@ struct MetalCanvasView: NSViewRepresentable {
         }
 
         func magnify(delta: CGFloat, appKitLocation: CGPoint, viewSize: CGSize) {
+            guard !renderer.isInputLocked else { return }
             renderer.markInteractionBegan()
             let factor = max(0.05, 1.0 + delta)
             let imageSpacePoint = CGPoint(x: appKitLocation.x, y: viewSize.height - appKitLocation.y)

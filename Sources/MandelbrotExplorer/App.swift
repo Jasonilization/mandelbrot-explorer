@@ -12,6 +12,9 @@ struct MandelbrotExplorerApp: App {
         if let path = ProcessInfo.processInfo.environment["ICON_OUTPUT_PATH"] {
             PresetPreviewTool.renderIcon(to: path)
         }
+        if let path = ProcessInfo.processInfo.environment["RECORDING_TEST_PATH"] {
+            PresetPreviewTool.runRecordingTest(outputPath: path)
+        }
     }
 
     var body: some Scene {

@@ -2,17 +2,23 @@ import SwiftUI
 
 struct ContentView: View {
     @StateObject private var renderer = FractalRenderer()
+    @StateObject private var recorder = FractalRecorder()
 
     var body: some View {
         NavigationSplitView {
-            SidebarView(renderer: renderer)
+            SidebarView(renderer: renderer, recorder: recorder)
         } detail: {
             VStack(spacing: 0) {
-                ZStack {
+                ZStack(alignment: .top) {
                     MetalCanvasView(renderer: renderer)
                     if !renderer.isReady {
                         LoadingOverlay()
                             .transition(.opacity)
+                    }
+                    if recorder.isActive {
+                        RecordingBanner(recorder: recorder)
+                            .padding(.top, 12)
+                            .transition(.move(edge: .top).combined(with: .opacity))
                     }
                 }
                 StatusBarView(renderer: renderer)
@@ -20,6 +26,24 @@ struct ContentView: View {
         }
         .navigationTitle("Mandelbrot Explorer")
         .animation(.easeOut(duration: 0.25), value: renderer.isReady)
+        .animation(.easeOut(duration: 0.25), value: recorder.isActive)
+    }
+}
+
+/// A small "recording in progress" pill over the canvas so it's obvious
+/// interaction is paused even if the settings sheet has been dismissed.
+private struct RecordingBanner: View {
+    @ObservedObject var recorder: FractalRecorder
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Circle().fill(.red).frame(width: 8, height: 8)
+            Text("Recording frame \(recorder.currentFrame) of \(recorder.totalFrames)")
+                .font(.system(size: 12, weight: .medium, design: .monospaced))
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(.thinMaterial, in: Capsule())
     }
 }
 
