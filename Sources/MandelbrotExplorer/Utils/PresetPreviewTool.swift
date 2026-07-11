@@ -409,19 +409,26 @@ enum PresetPreviewTool {
     }
 
     /// Renders a square, high-color-contrast crop for use as the app icon.
+    /// The default, classic full-set view (not zoomed into any particular
+    /// detail) with the color dials turned down, composited into a dark
+    /// "Liquid Glass"-style app icon -- see `AppIconRenderer`.
     static func renderIcon(to path: String) {
         let renderer = FractalRenderer()
         waitUntilReady(renderer)
-        renderer.palette = ColorPalette.all.first(where: { $0.id == "fire" }) ?? .default
-        let re = Expansion(decimalString: "-0.1592", precision: 4)
-        let im = Expansion(decimalString: "1.0317", precision: 4)
-        renderer.viewport = Viewport(center: ComplexExpansion(re: re, im: im), spanX: Viewport.initialSpanX / 120)
-        renderer.maxIterations = 600
+        renderer.palette = ColorPalette.all.first(where: { $0.id == "ice" }) ?? .default
+        renderer.viewport = Viewport.initial()
+        renderer.maxIterations = Preset.suggestedIterations(forZoom: renderer.viewport.zoomFactor)
+        renderer.colorScale = 0.12
+        renderer.colorOffset = 0
+        renderer.shadingEnabled = false
         var done = false
         renderer.captureFullQualityImage(size: CGSize(width: 1024, height: 1024)) { image in
             defer { done = true }
-            guard let image else { logErr("icon render FAILED"); return }
-            let rep = NSBitmapImageRep(cgImage: image)
+            guard let image, let composited = AppIconRenderer.compositeGlassIcon(fractal: image) else {
+                logErr("icon render FAILED")
+                return
+            }
+            let rep = NSBitmapImageRep(cgImage: composited)
             if let data = rep.representation(using: .png, properties: [:]) {
                 try? data.write(to: URL(fileURLWithPath: path))
                 logErr("wrote icon to \(path)")
