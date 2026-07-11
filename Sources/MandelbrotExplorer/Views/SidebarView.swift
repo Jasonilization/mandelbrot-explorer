@@ -2,7 +2,12 @@ import SwiftUI
 
 struct SidebarView: View {
     @ObservedObject var renderer: FractalRenderer
-    @State private var iterationsText: String = ""
+    @ObservedObject var recorder: FractalRecorder
+    /// See `ContentView.onExploreJulia`.
+    var onExploreJulia: ((SIMD2<Double>) -> Void)? = nil
+    @State private var showingRecorder = false
+    @State private var showingPaletteEditor = false
+    @State private var exportResolution: ExportResolution = .default
 
     var body: some View {
         Form {
@@ -26,60 +31,32 @@ struct SidebarView: View {
                     renderer.autoIterationsEnabled = true
                     renderer.viewport.reset()
                 }
-            }
 
-            Section("Rendering") {
-                Stepper(value: Binding(
-                    get: { renderer.maxIterations },
-                    set: { renderer.autoIterationsEnabled = false; renderer.maxIterations = $0 }
-                ), in: 50...20000, step: 50) {
-                    HStack {
-                        Text("Iterations")
-                        Spacer()
-                        Text("\(renderer.maxIterations)")
-                            .foregroundStyle(.secondary)
-                            .monospacedDigit()
-                        if renderer.autoIterationsEnabled {
-                            Text("auto")
-                                .font(.caption2)
-                                .foregroundStyle(.tertiary)
-                        }
+                if let onExploreJulia {
+                    Button {
+                        onExploreJulia(renderer.viewport.centerApprox)
+                    } label: {
+                        Label("Open Julia Set at Center", systemImage: "atom")
                     }
-                }
-
-                LabeledContent("Precision Tier") {
-                    Text(renderer.currentTierLabel)
-                        .foregroundStyle(.secondary)
+                    .help("Explore the Julia set for c = the current view's center point. Double-clicking anywhere on the canvas does the same for that exact point.")
                 }
             }
 
-            Section("Color") {
-                Picker("Palette", selection: $renderer.palette) {
-                    ForEach(ColorPalette.all) { p in
-                        Text(p.name).tag(p)
-                    }
-                }
-                .pickerStyle(.menu)
-
-                VStack(alignment: .leading) {
-                    Text("Color Scale")
-                    Slider(value: $renderer.colorScale, in: 0.1...5.0)
-                }
-                VStack(alignment: .leading) {
-                    Text("Color Offset")
-                    Slider(value: $renderer.colorOffset, in: 0...1)
-                }
-            }
-
-            Section("Export") {
-                Button {
-                    SaveImageAction.run(renderer: renderer)
-                } label: {
-                    Label("Save Image…", systemImage: "square.and.arrow.down")
-                }
-            }
+            FractalCommonSidebarSections(
+                renderer: renderer,
+                recorder: recorder,
+                showingRecorder: $showingRecorder,
+                showingPaletteEditor: $showingPaletteEditor,
+                exportResolution: $exportResolution
+            )
         }
         .formStyle(.grouped)
         .frame(minWidth: 260, idealWidth: 280)
+        .sheet(isPresented: $showingRecorder) {
+            RecordingView(renderer: renderer, recorder: recorder)
+        }
+        .sheet(isPresented: $showingPaletteEditor) {
+            PaletteEditorView(renderer: renderer)
+        }
     }
 }

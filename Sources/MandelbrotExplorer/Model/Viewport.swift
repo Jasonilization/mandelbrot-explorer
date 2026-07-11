@@ -9,9 +9,21 @@ struct Viewport {
     var spanX: Double
 
     static let initialSpanX = 4.0
+    /// Floor for `spanX`: past this, we're beyond both the precision budget
+    /// and Double's exponent range. Shared with auto-zoom so it knows when
+    /// to stop rather than looping forever with no visible effect.
+    static let minSpanX = 1e-290
 
     static func initial() -> Viewport {
         Viewport(center: ComplexExpansion(re: Expansion(-0.5), im: Expansion(0.0)), spanX: initialSpanX)
+    }
+
+    /// Default framing for the Julia explorer: centered on the origin (the
+    /// classic framing, since a Julia set's interesting structure is
+    /// generally centered around z=0 regardless of which c it's drawn for)
+    /// rather than the Mandelbrot set's off-center `initial()` framing.
+    static func julia() -> Viewport {
+        Viewport(center: .zero, spanX: initialSpanX)
     }
 
     var zoomFactor: Double {
@@ -58,11 +70,26 @@ struct Viewport {
         // Clamp to avoid pathological zoom-out past the classic view or
         // zoom-in past what our precision budget / Double exponent range support.
         spanX = min(spanX, 6.0)
-        spanX = max(spanX, 1e-290)
+        spanX = max(spanX, Viewport.minSpanX)
     }
 
     mutating func reset() {
         self = Viewport.initial()
+    }
+
+    /// Double-precision fractal-plane coordinate under a screen point, in the
+    /// same point-space convention (top-left origin, +y down) `zoom(by:
+    /// aroundScreenPoint:viewSize:)` already uses. Used for "click a point in
+    /// the Mandelbrot set to explore its Julia set" -- `Double` precision is
+    /// plenty here since the resulting value only ever seeds a Julia
+    /// explorer's fixed (never further-zoomed) `c` parameter, not a
+    /// coordinate that itself needs to survive deep zoom.
+    func fractalCoordinate(atScreenPoint point: CGPoint, viewSize: CGSize) -> SIMD2<Double> {
+        guard viewSize.width > 0 else { return centerApprox }
+        let pixelSize = spanX / Double(viewSize.width)
+        let dx = (Double(point.x) - Double(viewSize.width) / 2) * pixelSize
+        let dy = (Double(viewSize.height) / 2 - Double(point.y)) * pixelSize
+        return centerApprox + SIMD2(dx, dy)
     }
 
     /// Best double-precision approximation of the center, valid for tiers

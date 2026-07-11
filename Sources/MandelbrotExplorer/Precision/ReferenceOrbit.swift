@@ -10,23 +10,30 @@ struct ReferenceOrbit {
     var points: [SIMD2<Double>]
     var escapedAtIteration: Int?
 
+    /// `start` is the orbit's z_0 (arbitrary precision); `addedConstant` is
+    /// added every iteration. For Mandelbrot, `start` is always `.zero` and
+    /// `addedConstant` is the c value being explored (one per reference).
+    /// For Julia, `start` is the z0 value being explored and `addedConstant`
+    /// is the fixed, shared `c` parameter -- the two families are the same
+    /// recurrence with these roles swapped.
     static func compute(
-        center: ComplexExpansion,
+        start: ComplexExpansion = .zero,
+        addedConstant: ComplexExpansion,
         maxIterations: Int,
         escapeRadiusSquared: Double,
         precision: Int
     ) -> ReferenceOrbit {
-        var z = ComplexExpansion.zero
+        var z = start
         var points: [SIMD2<Double>] = []
         points.reserveCapacity(maxIterations + 1)
-        points.append(.zero)
+        points.append(start.approximateValue)
 
         var escapedAt: Int? = nil
         let hardCap = max(escapeRadiusSquared * 4, 1e6)
 
         var n = 0
         while n < maxIterations {
-            z = z.squared(precision: precision).adding(center, precision: precision)
+            z = z.squared(precision: precision).adding(addedConstant, precision: precision)
             let approx = z.approximateValue
             points.append(approx)
             n += 1

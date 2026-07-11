@@ -13,6 +13,52 @@ struct FractalParams {
     var height: UInt32
     var maxIterations: UInt32
     var escapeRadiusSq: Float
+    /// Raw value of `ColorMode`: 0 escape time, 1 distance estimation, 2 orbit trap.
+    var colorMode: UInt32
+    /// 0/1. Only affects escape-time mode -- continuous vs. banded integer count.
+    var smoothingEnabled: UInt32
+    /// Raw value of `OrbitTrapType`: 0 circle, 1 line, 2 cross, 3 custom point.
+    var trapType: UInt32
+    /// Circle radius / line angle (radians) / custom point x, depending on trapType.
+    var trapParamX: Float
+    /// Unused for circle/line / custom point y, depending on trapType.
+    var trapParamY: Float
+    /// Raw value of `FractalKind`: 0 Mandelbrot, 1 Julia.
+    var mode: UInt32
+    /// Julia mode's fixed c parameter (unused for Mandelbrot). Plain float32
+    /// is plenty of precision -- unlike the coordinate fields above, this
+    /// value is never itself the target of deep zoom.
+    var juliaC: SIMD2<Float>
+    /// 0/1. See the matching doc comment on the Metal-side struct: when
+    /// `maxIterations` has been temporarily cut for interactive
+    /// responsiveness, colors a point that still hasn't escaped by that cut
+    /// budget the same as an escaping point at the cap, rather than
+    /// guessing "interior" and painting the flat interior color.
+    var previewMode: UInt32
+
+    init(centerHi: SIMD2<Float>, centerLo: SIMD2<Float>, spanX: Float, aspect: Float,
+         width: UInt32, height: UInt32, maxIterations: UInt32, escapeRadiusSq: Float,
+         colorMode: UInt32 = 0, smoothingEnabled: UInt32 = 1,
+         trapType: UInt32 = 0, trapParamX: Float = 0.5, trapParamY: Float = 0,
+         mode: UInt32 = 0, juliaC: SIMD2<Float> = SIMD2(0, 0),
+         previewMode: UInt32 = 0) {
+        self.centerHi = centerHi
+        self.centerLo = centerLo
+        self.spanX = spanX
+        self.aspect = aspect
+        self.width = width
+        self.height = height
+        self.maxIterations = maxIterations
+        self.escapeRadiusSq = escapeRadiusSq
+        self.colorMode = colorMode
+        self.smoothingEnabled = smoothingEnabled
+        self.trapType = trapType
+        self.trapParamX = trapParamX
+        self.trapParamY = trapParamY
+        self.mode = mode
+        self.juliaC = juliaC
+        self.previewMode = previewMode
+    }
 }
 
 /// Mirrors `PaletteParams` in Shaders.metal. All-scalar (no embedded
@@ -25,6 +71,15 @@ struct PaletteParams {
     var sourceHeight: UInt32
     var outWidth: UInt32
     var outHeight: UInt32
+    var interiorR: Float
+    var interiorG: Float
+    var interiorB: Float
+    /// 0/1. Adds a cheap relief-shading pass using the scalar field as a
+    /// fake heightmap, so boundary structure reads as more three-dimensional.
+    var shadingEnabled: UInt32
+    var lightAzimuth: Float
+    var lightElevation: Float
+    var shadingStrength: Float
 }
 
 /// Splits a `Double` into a compensated float32 (hi, lo) pair such that

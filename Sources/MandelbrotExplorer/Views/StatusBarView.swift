@@ -8,6 +8,11 @@ struct StatusBarView: View {
             Label(coordinateText, systemImage: "location")
             Label(zoomText, systemImage: "plus.magnifyingglass")
 
+            HStack(spacing: 5) {
+                Circle().fill(tierColor).frame(width: 7, height: 7)
+                Text(tierShortLabel)
+            }
+
             Spacer()
 
             if renderer.isRefining {
@@ -37,5 +42,23 @@ struct StatusBarView: View {
         let z = renderer.viewport.zoomFactor
         if z < 1000 { return String(format: "%.1f×", z) }
         return String(format: "%.2e×", z)
+    }
+
+    /// Compact rendering-mode chip, color-matched to the Help sheet's
+    /// per-tier icons so the two stay visually associated.
+    private var tierShortLabel: String {
+        switch renderer.viewport.tier {
+        case .float32: "GPU"
+        case .doubleDouble: "GPU · DD"
+        case .perturbation: "CPU · Perturbation"
+        }
+    }
+
+    private var tierColor: Color {
+        switch renderer.viewport.tier {
+        case .float32: .green
+        case .doubleDouble: .blue
+        case .perturbation: .orange
+        }
     }
 }

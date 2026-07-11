@@ -3,9 +3,8 @@ import UniformTypeIdentifiers
 
 @MainActor
 enum SaveImageAction {
-    static func run(renderer: FractalRenderer) {
-        let exportSize = CGSize(width: 2560, height: 1440)
-        renderer.captureFullQualityImage(size: exportSize) { cgImage in
+    static func run(renderer: FractalRenderer, resolution: ExportResolution = .default) {
+        renderer.captureFullQualityImage(size: resolution.size) { cgImage in
             guard let cgImage else { return }
             let panel = NSSavePanel()
             panel.allowedContentTypes = [.png]
