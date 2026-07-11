@@ -27,6 +27,9 @@ struct MandelbrotExplorerApp: App {
         if let spec = ProcessInfo.processInfo.environment["JULIA_DEBUG_SINGLE"] {
             PresetPreviewTool.runJuliaSingle(spec: spec)
         }
+        if ProcessInfo.processInfo.environment["PREVIEW_MODE_VERIFY"] != nil {
+            PresetPreviewTool.runPreviewModeVerification()
+        }
     }
 
     var body: some Scene {

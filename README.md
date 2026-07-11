@@ -118,16 +118,40 @@ automatically refine to full quality once movement stops -- and on the CPU
 perturbation tier, that render arrives progressively (tile by tile) rather
 than freezing the old frame until the whole buffer is ready.
 
-The one gap this closed: the perturbation tier's render resolution changes
-at the start and end of every interaction (a smaller preview size while
-moving, full resolution once settled), which requires a differently-sized
-iteration texture. Reallocating that texture used to blank it to a flat
-interior color for the instant before the new size's first results landed,
-which briefly flashed a blank frame right at the start and end of every
-interaction on a deep zoom. It's now seeded with a bilinear resample of
-whatever was on screen before, so that transition reads as an instant,
-if momentarily blurry, continuation of the same scene instead of a black
-flash -- see the doc comment on `FractalRenderer.makeOrReuseIterationTexture`.
+Two gaps this closed:
+
+- **Black-frame flash on resize.** The perturbation tier's render
+  resolution changes at the start and end of every interaction (a smaller
+  preview size while moving, full resolution once settled), which requires
+  a differently-sized iteration texture. Reallocating that texture used to
+  blank it to a flat interior color for the instant before the new size's
+  first results landed, which briefly flashed a blank frame right at the
+  start and end of every interaction on a deep zoom. It's now seeded with a
+  bilinear resample of whatever was on screen before, so that transition
+  reads as an instant, if momentarily blurry, continuation of the same
+  scene instead of a black flash -- see the doc comment on
+  `FractalRenderer.makeOrReuseIterationTexture`.
+
+- **Incorrect escape classification during the reduced-iteration pass.**
+  Cutting `maxIterations` while animating is what keeps frame rate smooth,
+  but a point that hasn't escaped by that *cut* budget might be genuinely
+  interior, or might just need more iterations than this one frame's
+  budget allows -- those two cases are indistinguishable without iterating
+  further. The renderer used to guess "interior" and paint the flat
+  interior color, which read as incorrect black holes punched into
+  boundary detail while zooming or panning at any real depth (verified: at
+  a typical deep-zoom boundary view, cutting the budget from 2000 to 250
+  iterations wrongly painted **100%** of the genuinely-exterior pixels that
+  needed more than 250 iterations as solid interior). It now colors an
+  unresolved point the same as an escaping point at the cap instead, so it
+  blends into the surrounding gradient rather than reading as a
+  misclassified hole, until a full-iteration pass resolves it for real --
+  see `previewMode` in `Shaders.metal`/`ShaderTypes.swift` and
+  `Perturbation.render`. The iteration cut itself is now proportional to
+  the view's real `maxIterations` (with a floor) rather than a fixed
+  number, so deep zooms keep meaningfully more detail live during
+  interaction instead of collapsing to a near-fixed floor regardless of
+  depth.
 
 ## Mandelbulb Explorer
 
@@ -267,6 +291,11 @@ high-precision computation):
   constants (plus a deep perturbation-tier zoom) straight to PNGs.
 - `JULIA_DEBUG_SINGLE="z0real,z0imag,cReal,cImag,zoom,iterations"` -- the
   Julia-mode counterpart to `PERTURBATION_DEBUG_SINGLE`.
+- `PREVIEW_MODE_VERIFY=1` -- renders a deep-zoom boundary view at full
+  iterations, at a cut budget without `previewMode`, and at the same cut
+  budget with it, then reports how many genuinely-exterior pixels each cut
+  render wrongly painted solid interior (see "Rendering quality during
+  interaction" above).
 - `COLOR_MODE_TEST_DIR=<dir>` -- renders every color mode/orbit trap
   shape/shading combination at both a GPU-tier and a perturbation-tier
   zoom, straight to PNGs.

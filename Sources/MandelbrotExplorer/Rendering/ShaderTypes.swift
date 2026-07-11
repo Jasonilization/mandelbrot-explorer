@@ -29,12 +29,19 @@ struct FractalParams {
     /// is plenty of precision -- unlike the coordinate fields above, this
     /// value is never itself the target of deep zoom.
     var juliaC: SIMD2<Float>
+    /// 0/1. See the matching doc comment on the Metal-side struct: when
+    /// `maxIterations` has been temporarily cut for interactive
+    /// responsiveness, colors a point that still hasn't escaped by that cut
+    /// budget the same as an escaping point at the cap, rather than
+    /// guessing "interior" and painting the flat interior color.
+    var previewMode: UInt32
 
     init(centerHi: SIMD2<Float>, centerLo: SIMD2<Float>, spanX: Float, aspect: Float,
          width: UInt32, height: UInt32, maxIterations: UInt32, escapeRadiusSq: Float,
          colorMode: UInt32 = 0, smoothingEnabled: UInt32 = 1,
          trapType: UInt32 = 0, trapParamX: Float = 0.5, trapParamY: Float = 0,
-         mode: UInt32 = 0, juliaC: SIMD2<Float> = SIMD2(0, 0)) {
+         mode: UInt32 = 0, juliaC: SIMD2<Float> = SIMD2(0, 0),
+         previewMode: UInt32 = 0) {
         self.centerHi = centerHi
         self.centerLo = centerLo
         self.spanX = spanX
@@ -50,6 +57,7 @@ struct FractalParams {
         self.trapParamY = trapParamY
         self.mode = mode
         self.juliaC = juliaC
+        self.previewMode = previewMode
     }
 }
 

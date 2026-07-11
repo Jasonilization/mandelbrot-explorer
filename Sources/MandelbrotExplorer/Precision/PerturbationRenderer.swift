@@ -91,6 +91,16 @@ enum Perturbation {
         colorMode: ColorMode = .escapeTime,
         smoothingEnabled: Bool = true,
         trap: OrbitTrapSettings = .default,
+        /// True when `maxIterations` has been temporarily cut for interactive
+        /// responsiveness rather than reflecting the view's real detail
+        /// budget. A pixel that doesn't escape within a cut budget might be
+        /// genuinely interior, or might just need more iterations than this
+        /// pass allows -- there's no way to tell apart without iterating
+        /// further, so this colors it the same as an escaping point at the
+        /// cap instead of guessing "interior" and painting the flat interior
+        /// color, which otherwise reads as incorrect holes in boundary
+        /// detail while zooming/panning.
+        previewMode: Bool = false,
         isCancelled: @Sendable () -> Bool = { false },
         onTileComplete: (@Sendable (TileUpdate) -> Void)? = nil
     ) -> Result {
@@ -301,11 +311,22 @@ enum Perturbation {
                         return (Float(trapDist * Perturbation.orbitTrapColorScale), false)
                     }
                 } else {
-                    // Never escaped (interior/bounded). Orbit trap coloring
-                    // paints the whole set, not just the boundary, so it
-                    // gets a real value here too; the other modes keep the
-                    // flat interior-color sentinel.
-                    return (colorMode == .orbitTrap ? Float(trapDist * Perturbation.orbitTrapColorScale) : -1, false)
+                    // Never escaped. Orbit trap coloring paints the whole
+                    // set, not just the boundary, so it gets a real value
+                    // here too. In previewMode, `n` only reached a
+                    // temporarily-cut budget rather than the view's real
+                    // maxIterations -- see `previewMode`'s doc comment for
+                    // why that means this pixel isn't reliably "interior"
+                    // and gets colored like an escaping point at the cap
+                    // instead. Otherwise it's the flat interior-color
+                    // sentinel.
+                    if colorMode == .orbitTrap {
+                        return (Float(trapDist * Perturbation.orbitTrapColorScale), false)
+                    } else if previewMode {
+                        return (Float(n), false)
+                    } else {
+                        return (-1, false)
+                    }
                 }
             }
 

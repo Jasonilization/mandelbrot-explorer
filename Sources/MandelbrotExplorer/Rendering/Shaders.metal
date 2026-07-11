@@ -23,6 +23,18 @@ struct FractalParams {
     float  trapParamY;
     uint   mode;           // 0 Mandelbrot, 1 Julia -- see FractalKind
     float2 juliaC;         // Julia's fixed c parameter (unused for Mandelbrot)
+    // 0/1. When maxIterations has been temporarily cut for interactive
+    // responsiveness (see FractalRenderer.renderGPUTier), a point that
+    // still hasn't escaped by that reduced cap might genuinely be
+    // interior, or might just need more iterations than this frame's
+    // budget allows -- there's no way to tell them apart without
+    // iterating further. Rather than guess "interior" and paint the flat
+    // interior color (which reads as incorrect holes punched into
+    // boundary detail while zooming), previewMode colors it the same way
+    // an escaping point at the iteration cap would be colored, so it
+    // blends into the surrounding gradient until a full-iteration pass
+    // resolves it for real.
+    uint   previewMode;
 };
 
 #define COLOR_MODE_ESCAPE_TIME 0u
@@ -176,7 +188,13 @@ kernel void mandelbrotFloat32(texture2d<float, access::write> outTexture [[textu
 
     float value;
     if (n >= params.maxIterations) {
-        value = (params.colorMode == COLOR_MODE_ORBIT_TRAP) ? (trapDist * ORBIT_TRAP_COLOR_SCALE) : -1.0;
+        if (params.colorMode == COLOR_MODE_ORBIT_TRAP) {
+            value = trapDist * ORBIT_TRAP_COLOR_SCALE;
+        } else if (params.previewMode != 0) {
+            value = float(n);
+        } else {
+            value = -1.0;
+        }
     } else if (params.colorMode == COLOR_MODE_DISTANCE_EST) {
         float dzMag = sqrt(dzRe * dzRe + dzIm * dzIm);
         float zMag = sqrt(mag2);
@@ -262,7 +280,13 @@ kernel void mandelbrotDoubleDouble(texture2d<float, access::write> outTexture [[
 
     float value;
     if (n >= params.maxIterations) {
-        value = (params.colorMode == COLOR_MODE_ORBIT_TRAP) ? (trapDist * ORBIT_TRAP_COLOR_SCALE) : -1.0;
+        if (params.colorMode == COLOR_MODE_ORBIT_TRAP) {
+            value = trapDist * ORBIT_TRAP_COLOR_SCALE;
+        } else if (params.previewMode != 0) {
+            value = float(n);
+        } else {
+            value = -1.0;
+        }
     } else if (params.colorMode == COLOR_MODE_DISTANCE_EST) {
         float dzMag = sqrt(dzRe * dzRe + dzIm * dzIm);
         float zMag = sqrt(mag2);

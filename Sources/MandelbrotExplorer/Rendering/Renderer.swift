@@ -540,7 +540,16 @@ final class FractalRenderer: NSObject, ObservableObject, MTKViewDelegate {
         renderWidth = renderW
         renderHeight = renderH
 
-        let iterations = isAnimating ? min(maxIterations, 220) : maxIterations
+        // A hard cap regardless of the view's real maxIterations (previously
+        // a flat 220) would, at deep zoom where maxIterations can run into
+        // the thousands, cut the animated budget by 99%+ -- collapsing most
+        // boundary detail to a single flat value for the whole interaction.
+        // Scaling proportionally still bounds worst-case per-frame cost (the
+        // adaptive `qualityScale` resolution cut below is the actual frame
+        // rate safety net) while giving deep zooms a meaningfully higher
+        // budget than shallow ones, matching "reduce iterations slightly"
+        // rather than "collapse to a fixed floor."
+        let iterations = isAnimating ? min(maxIterations, max(220, maxIterations / 8)) : maxIterations
 
         guard let iterTex = makeOrReuseIterationTexture(width: renderW, height: renderH) else { return }
         guard stopsBuffer != nil else { return }
@@ -564,7 +573,8 @@ final class FractalRenderer: NSObject, ObservableObject, MTKViewDelegate {
             trapParamX: trap.x,
             trapParamY: trap.y,
             mode: kind.rawValue,
-            juliaC: SIMD2(Float(juliaC.x), Float(juliaC.y))
+            juliaC: SIMD2(Float(juliaC.x), Float(juliaC.y)),
+            previewMode: isAnimating ? 1 : 0
         )
 
         guard let commandBuffer = queue.makeCommandBuffer() else { return }
@@ -600,13 +610,17 @@ final class FractalRenderer: NSObject, ObservableObject, MTKViewDelegate {
         let renderW = max(8, Int(drawableSize.width * scale))
         let renderH = max(8, Int(drawableSize.height * scale))
 
-        let iterations = isAnimating ? min(maxIterations, 300) : maxIterations
+        // See the matching comment in renderGPUTier: proportional rather than
+        // a flat cap, so deep zooms with large maxIterations don't collapse
+        // most of their boundary detail to a single flat value throughout
+        // the whole interaction.
+        let iterations = isAnimating ? min(maxIterations, max(300, maxIterations / 8)) : maxIterations
         let signature = "\(kind.rawValue)|\(juliaC.x)|\(juliaC.y)|\(viewport.center.re.terms)|\(viewport.center.im.terms)|\(viewport.spanX)|\(iterations)|\(renderW)x\(renderH)|\(colorMode.rawValue)|\(smoothingEnabled)|\(orbitTrap)"
 
         if signature != lastPerturbationSignature && !perturbationBusy {
             lastPerturbationSignature = signature
             perturbationSettledAtFullQuality = !isAnimating
-            kickOffPerturbation(width: renderW, height: renderH, iterations: iterations)
+            kickOffPerturbation(width: renderW, height: renderH, iterations: iterations, previewMode: isAnimating)
         }
 
         renderWidth = renderW
@@ -628,7 +642,7 @@ final class FractalRenderer: NSObject, ObservableObject, MTKViewDelegate {
         commandBuffer.commit()
     }
 
-    private func kickOffPerturbation(width: Int, height: Int, iterations: Int) {
+    private func kickOffPerturbation(width: Int, height: Int, iterations: Int, previewMode: Bool = false) {
         perturbationBusy = true
         isRefining = true
         perturbationGeneration += 1
@@ -666,6 +680,7 @@ final class FractalRenderer: NSObject, ObservableObject, MTKViewDelegate {
                 colorMode: colorMode,
                 smoothingEnabled: smoothingEnabled,
                 trap: orbitTrap,
+                previewMode: previewMode,
                 onTileComplete: { tile in
                     Task { @MainActor [weak self] in
                         guard let self, generation == self.perturbationGeneration else { return }

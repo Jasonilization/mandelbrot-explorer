@@ -360,6 +360,54 @@ enum PresetPreviewTool {
         exit(0)
     }
 
+    /// Headless regression check that `previewMode` actually fixes the
+    /// "reduced iteration budget during animation misclassifies slow
+    /// boundary points as interior" bug: renders the same deep-zoom
+    /// boundary view at full iterations (ground truth), at a cut budget
+    /// without previewMode (the old, buggy behavior), and at the same cut
+    /// budget with previewMode (the fix), then reports how many pixels the
+    /// old behavior would have wrongly painted solid interior vs. how many
+    /// the fix does. Activated by PREVIEW_MODE_VERIFY.
+    static func runPreviewModeVerification() {
+        let zoom = 5e11
+        let precision = requiredPrecisionTerms(forZoom: zoom)
+        let re = Expansion(decimalString: "-0.7436438870371587", precision: precision)
+        let im = Expansion(decimalString: "0.13182590420533", precision: precision)
+        let center = ComplexExpansion(re: re, im: im)
+        let pixelSize = (Viewport.initialSpanX / zoom) / 900
+        let fullIterations = 2000
+        let cutIterations = 250
+
+        let truth = Perturbation.render(
+            centerDeep: center, pixelSize: pixelSize, width: 900, height: 560,
+            maxIterations: fullIterations, escapeRadius: 16.0, precision: precision
+        ).values
+        let buggy = Perturbation.render(
+            centerDeep: center, pixelSize: pixelSize, width: 900, height: 560,
+            maxIterations: cutIterations, escapeRadius: 16.0, precision: precision,
+            previewMode: false
+        ).values
+        let fixed = Perturbation.render(
+            centerDeep: center, pixelSize: pixelSize, width: 900, height: 560,
+            maxIterations: cutIterations, escapeRadius: 16.0, precision: precision,
+            previewMode: true
+        ).values
+
+        var trueExteriorCount = 0
+        var wronglyPaintedInterior = 0
+        var fixedStillPaintedInterior = 0
+        for i in 0..<truth.count {
+            guard truth[i] >= 0 else { continue } // only points that are genuinely exterior
+            trueExteriorCount += 1
+            if buggy[i] < 0 { wronglyPaintedInterior += 1 }
+            if fixed[i] < 0 { fixedStillPaintedInterior += 1 }
+        }
+        logErr("truth: \(truth.count) pixels, \(trueExteriorCount) genuinely exterior (need >\(cutIterations) iterations to resolve some of them: \(fullIterations) vs cut \(cutIterations))")
+        logErr("WITHOUT previewMode: \(wronglyPaintedInterior) / \(trueExteriorCount) genuinely-exterior pixels wrongly painted solid interior")
+        logErr("WITH previewMode:    \(fixedStillPaintedInterior) / \(trueExteriorCount) genuinely-exterior pixels wrongly painted solid interior")
+        exit(0)
+    }
+
     /// Renders a square, high-color-contrast crop for use as the app icon.
     static func renderIcon(to path: String) {
         let renderer = FractalRenderer()
